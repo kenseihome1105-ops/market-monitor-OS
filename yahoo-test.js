@@ -9,10 +9,7 @@ const MARKET_INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
 const MARKET = 'ヤフオク';
 const CONDITION_ID = 'Y-01';
 
-// 新着発見
 const MAX_SEARCH_ITEMS = 10;
-
-// 既存商品の価格追跡
 const MAX_TRACKED_ITEMS = 30;
 
 
@@ -20,32 +17,16 @@ const MAX_TRACKED_ITEMS = 30;
 // 共通
 // ============================================================
 
-function clean(text) {
-
-  return String(text || '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-}
-
-
 function sleep(ms) {
-
-  return new Promise(
-    resolve => setTimeout(resolve, ms)
-  );
-
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 
 // ============================================================
-// Apps Scriptへ送信
+// Apps Script送信
 // ============================================================
 
-async function sendToAppsScript(
-  items,
-  conditionId
-) {
+async function sendToAppsScript(items, conditionId) {
 
   if (!MARKET_INGEST_URL) {
     throw new Error(
@@ -90,9 +71,7 @@ async function sendToAppsScript(
         },
 
         body:
-          JSON.stringify(
-            payload
-          ),
+          JSON.stringify(payload),
 
         redirect:
           'follow'
@@ -104,21 +83,13 @@ async function sendToAppsScript(
     await response.text();
 
 
-  console.log(
-    'Apps Script HTTP:',
-    response.status
-  );
-
-
   let result;
 
 
   try {
 
     result =
-      JSON.parse(
-        text
-      );
+      JSON.parse(text);
 
   } catch (error) {
 
@@ -137,7 +108,7 @@ async function sendToAppsScript(
   if (!response.ok) {
 
     throw new Error(
-      'Apps Script HTTP送信失敗: ' +
+      'Apps Script HTTP失敗: ' +
       response.status
     );
 
@@ -161,12 +132,13 @@ async function sendToAppsScript(
 
 // ============================================================
 // Yahoo検索結果
-// 新しい商品を発見する
+//
+// 新着発見用。
+// Yahoo側が一時的に商品カードを返さなくても
+// 全体処理は止めない。
 // ============================================================
 
-async function scanYahooSearch(
-  page
-) {
+async function scanYahooSearch(page) {
 
   console.log(
     '=============================='
@@ -177,59 +149,128 @@ async function scanYahooSearch(
   );
 
 
-  await page.goto(
-    YAHOO_URL,
-    {
-      waitUntil:
-        'domcontentloaded',
+  let cardFound =
+    false;
 
-      timeout:
-        60000
+
+  // ----------------------------------------------------------
+  // 最大3回
+  // ----------------------------------------------------------
+
+  for (
+    let attempt = 1;
+    attempt <= 3;
+    attempt++
+  ) {
+
+    try {
+
+      console.log(
+        `検索試行 ${attempt}/3`
+      );
+
+
+      if (
+        attempt === 1
+      ) {
+
+        await page.goto(
+          YAHOO_URL,
+          {
+            waitUntil:
+              'domcontentloaded',
+
+            timeout:
+              60000
+          }
+        );
+
+      } else {
+
+        await page.reload({
+          waitUntil:
+            'domcontentloaded',
+
+          timeout:
+            60000
+        });
+
+      }
+
+
+      await page.waitForTimeout(
+        3000
+      );
+
+
+      const count =
+        await page.locator(
+          'li.Product'
+        ).count();
+
+
+      console.log(
+        '商品カード数:',
+        count
+      );
+
+
+      if (
+        count > 0
+      ) {
+
+        cardFound =
+          true;
+
+        break;
+
+      }
+
+
+    } catch (error) {
+
+      console.log(
+        '検索試行失敗:',
+        error.message
+      );
+
     }
-  );
 
 
-  try {
-
-    await page.waitForSelector(
-      'li.Product',
-      {
-        timeout:
-          30000
-      }
-    );
-
-  } catch (error) {
-
-    console.log(
-      '商品カード初回待機失敗。1回だけ再読込'
-    );
-
-
-    await page.reload({
-      waitUntil:
-        'domcontentloaded',
-
-      timeout:
-        60000
-    });
-
-
-    await page.waitForSelector(
-      'li.Product',
-      {
-        timeout:
-          30000
-      }
+    await sleep(
+      3000
     );
 
   }
 
 
-  await page.waitForTimeout(
-    1500
-  );
+  // ----------------------------------------------------------
+  // Yahoo検索が一時的に失敗
+  //
+  // ここではthrowしない。
+  // 既存商品の価格追跡へ進む。
+  // ----------------------------------------------------------
 
+  if (
+    !cardFound
+  ) {
+
+    console.log(
+      '⚠️ Yahoo新着検索は今回取得できませんでした'
+    );
+
+    console.log(
+      '⚠️ 既存商品の価格追跡は継続します'
+    );
+
+    return [];
+
+  }
+
+
+  // ==========================================================
+  // 商品カード解析
+  // ==========================================================
 
   const items =
     await page.evaluate(
@@ -269,9 +310,9 @@ async function scanYahooSearch(
           of cards
         ) {
 
-          // ----------------------------------------
-          // URL / ID
-          // ----------------------------------------
+          // ====================================================
+          // URL / 商品ID
+          // ====================================================
 
           const auctionAnchors =
             Array.from(
@@ -294,8 +335,7 @@ async function scanYahooSearch(
           ) {
 
             const candidate =
-              anchor.href ||
-              '';
+              anchor.href || '';
 
 
             const match =
@@ -304,7 +344,9 @@ async function scanYahooSearch(
               );
 
 
-            if (match) {
+            if (
+              match
+            ) {
 
               href =
                 candidate;
@@ -330,9 +372,9 @@ async function scanYahooSearch(
           }
 
 
-          // ----------------------------------------
+          // ====================================================
           // タイトル
-          // ----------------------------------------
+          // ====================================================
 
           const titleCandidates =
             auctionAnchors
@@ -408,8 +450,7 @@ async function scanYahooSearch(
 
 
           let title =
-            titleCandidates[0] ||
-            '';
+            titleCandidates[0] || '';
 
 
           if (!title) {
@@ -440,9 +481,9 @@ async function scanYahooSearch(
             );
 
 
-          // ----------------------------------------
+          // ====================================================
           // 現在価格
-          // ----------------------------------------
+          // ====================================================
 
           let price =
             0;
@@ -464,7 +505,9 @@ async function scanYahooSearch(
           }
 
 
-          if (priceMatch) {
+          if (
+            priceMatch
+          ) {
 
             price =
               Number(
@@ -478,9 +521,9 @@ async function scanYahooSearch(
           }
 
 
-          // ----------------------------------------
+          // ====================================================
           // 残り時間
-          // ----------------------------------------
+          // ====================================================
 
           let remainingTime =
             '';
@@ -492,7 +535,9 @@ async function scanYahooSearch(
             );
 
 
-          if (remainingElement) {
+          if (
+            remainingElement
+          ) {
 
             remainingTime =
               cleanText(
@@ -512,7 +557,9 @@ async function scanYahooSearch(
           }
 
 
-          if (!remainingTime) {
+          if (
+            !remainingTime
+          ) {
 
             const timeInfo =
               card.querySelector(
@@ -542,7 +589,9 @@ async function scanYahooSearch(
               );
 
 
-            if (timeMatch) {
+            if (
+              timeMatch
+            ) {
 
               remainingTime =
                 cleanText(
@@ -554,19 +603,23 @@ async function scanYahooSearch(
           }
 
 
-          if (!remainingTime) {
+          if (
+            !remainingTime
+          ) {
 
-            const cardTimeMatch =
+            const fallback =
               cardText.match(
                 /(?:^|\s)(\d+\s*(?:日|時間|分))(?:\s|$)/
               );
 
 
-            if (cardTimeMatch) {
+            if (
+              fallback
+            ) {
 
               remainingTime =
                 cleanText(
-                  cardTimeMatch[1]
+                  fallback[1]
                 );
 
             }
@@ -574,9 +627,9 @@ async function scanYahooSearch(
           }
 
 
-          // ----------------------------------------
+          // ====================================================
           // 安全監査
-          // ----------------------------------------
+          // ====================================================
 
           if (!title) {
             continue;
@@ -587,9 +640,7 @@ async function scanYahooSearch(
             title.length >
             250
           ) {
-
             continue;
-
           }
 
 
@@ -598,9 +649,7 @@ async function scanYahooSearch(
             price <= 0 ||
             price > 29000
           ) {
-
             continue;
-
           }
 
 
@@ -608,9 +657,7 @@ async function scanYahooSearch(
             !/^https:\/\/auctions\.yahoo\.co\.jp\/jp\/auction\//
               .test(href)
           ) {
-
             continue;
-
           }
 
 
@@ -676,25 +723,16 @@ async function scanYahooSearch(
   );
 
 
-  if (
-    items.length === 0
-  ) {
-
-    throw new Error(
-      'Yahoo検索結果の商品取得が0件です'
-    );
-
-  }
-
-
   return items;
 
 }
 
 
 // ============================================================
-// 商品詳細ページ
-// 検索結果から消えても現在価格を追跡
+// Yahoo商品詳細ページ
+//
+// 検索結果から消えた後も
+// 現在価格を追跡。
 // ============================================================
 
 async function scanTrackedYahooItem(
@@ -717,7 +755,7 @@ async function scanTrackedYahooItem(
 
 
     await page.waitForTimeout(
-      800
+      1200
     );
 
 
@@ -745,9 +783,20 @@ async function scanTrackedYahooItem(
             );
 
 
-          // ========================================
+          // ====================================================
+          // 終了済み
+          // ====================================================
+
+          const ended =
+            /このオークションは終了しています|オークションは終了しました/
+              .test(
+                bodyText
+              );
+
+
+          // ====================================================
           // 現在価格
-          // ========================================
+          // ====================================================
 
           let price =
             0;
@@ -785,9 +834,9 @@ async function scanTrackedYahooItem(
           }
 
 
-          // ========================================
+          // ====================================================
           // 残り時間
-          // ========================================
+          // ====================================================
 
           let remainingTime =
             '';
@@ -810,15 +859,12 @@ async function scanTrackedYahooItem(
           }
 
 
-          // ========================================
-          // 終了日時
-          //
-          // 例:
-          // 9月24日 (木) 22時10分 終了予定
-          // ========================================
+          // ====================================================
+          // 終了予定
+          // ====================================================
 
-          let endText =
-            '';
+          let endParts =
+            null;
 
 
           const endMatch =
@@ -831,26 +877,31 @@ async function scanTrackedYahooItem(
             endMatch
           ) {
 
-            endText =
-              [
-                endMatch[1],
-                endMatch[2],
-                endMatch[3],
-                endMatch[4]
-              ].join('|');
+            endParts = {
+
+              month:
+                Number(
+                  endMatch[1]
+                ),
+
+              day:
+                Number(
+                  endMatch[2]
+                ),
+
+              hour:
+                Number(
+                  endMatch[3]
+                ),
+
+              minute:
+                Number(
+                  endMatch[4]
+                )
+
+            };
 
           }
-
-
-          // ========================================
-          // 終了判定
-          // ========================================
-
-          const ended =
-            /このオークションは終了しています|オークションは終了しました/
-              .test(
-                bodyText
-              );
 
 
           return {
@@ -859,7 +910,7 @@ async function scanTrackedYahooItem(
 
             remainingTime,
 
-            endText,
+            endParts,
 
             ended
 
@@ -898,74 +949,89 @@ async function scanTrackedYahooItem(
     }
 
 
+    // ========================================================
+    // 終了日時
+    //
+    // Yahooは日本時間なので +09:00 を明示
+    // ========================================================
+
     let endTime =
       '';
 
 
     if (
-      detail.endText
+      detail.endParts
     ) {
 
-      const parts =
-        detail.endText
-          .split('|')
-          .map(Number);
+      const nowJstYear =
+        Number(
+          new Intl.DateTimeFormat(
+            'en',
+            {
+              timeZone:
+                'Asia/Tokyo',
+
+              year:
+                'numeric'
+            }
+          ).format(
+            new Date()
+          )
+        );
 
 
-      const month =
-        parts[0];
+      let year =
+        nowJstYear;
 
-      const day =
-        parts[1];
 
-      const hour =
-        parts[2];
+      const pad =
+        n =>
+          String(n)
+            .padStart(
+              2,
+              '0'
+            );
 
-      const minute =
-        parts[3];
+
+      let iso =
+        `${year}-` +
+        `${pad(detail.endParts.month)}-` +
+        `${pad(detail.endParts.day)}T` +
+        `${pad(detail.endParts.hour)}:` +
+        `${pad(detail.endParts.minute)}:00+09:00`;
+
+
+      let candidate =
+        new Date(
+          iso
+        );
 
 
       const now =
         new Date();
 
 
-      let year =
-        now.getFullYear();
-
-
-      let candidate =
-        new Date(
-          year,
-          month - 1,
-          day,
-          hour,
-          minute,
-          0
-        );
-
-
-      // 年末跨ぎ対策
       if (
         candidate.getTime() <
         now.getTime() -
-          1000 * 60 * 60 * 24 * 180
+        1000 * 60 * 60 * 24 * 180
       ) {
 
-        candidate =
-          new Date(
-            year + 1,
-            month - 1,
-            day,
-            hour,
-            minute,
-            0
-          );
+        year++;
+
+
+        iso =
+          `${year}-` +
+          `${pad(detail.endParts.month)}-` +
+          `${pad(detail.endParts.day)}T` +
+          `${pad(detail.endParts.hour)}:` +
+          `${pad(detail.endParts.minute)}:00+09:00`;
 
       }
 
 
       endTime =
-        candidate.toISOString();
+        iso;
 
     }
 
@@ -1000,6 +1066,7 @@ async function scanTrackedYahooItem(
       error.message
     );
 
+
     return null;
 
   }
@@ -1008,7 +1075,7 @@ async function scanTrackedYahooItem(
 
 
 // ============================================================
-// Yahoo既存商品の価格追跡
+// 既存Yahoo価格追跡
 // ============================================================
 
 async function trackExistingYahooItems(
@@ -1083,7 +1150,9 @@ async function trackExistingYahooItems(
       );
 
 
-    if (!update) {
+    if (
+      !update
+    ) {
 
       continue;
 
@@ -1095,7 +1164,7 @@ async function trackExistingYahooItems(
       trackedItem.currentPrice,
       '→',
       update.price,
-      ' / 残り:',
+      '/ 残り:',
       update.remainingTime || '不明'
     );
 
@@ -1127,7 +1196,6 @@ async function trackExistingYahooItems(
     );
 
 
-    // Yahoo側への負荷を抑える
     await sleep(
       500
     );
@@ -1138,7 +1206,6 @@ async function trackExistingYahooItems(
   await page.close();
 
 
-  // 条件IDごとに台帳へ反映
   for (
     const [
       conditionId,
@@ -1166,7 +1233,7 @@ async function trackExistingYahooItems(
 
 
     console.log(
-      '価格追跡更新:',
+      '追跡更新:',
       conditionId,
       '件数:',
       items.length,
@@ -1216,7 +1283,7 @@ async function main() {
 
 
     // ========================================================
-    // 1. 新着検索
+    // ① 新着発見
     // ========================================================
 
     const searchItems =
@@ -1226,8 +1293,10 @@ async function main() {
 
 
     // ========================================================
-    // 2. 新着を台帳へ登録
-    //    同時に既存Yahoo追跡リストを受け取る
+    // 新着検索が0件でも送信する
+    //
+    // market-ingestから
+    // trackedYahooを受け取るため。
     // ========================================================
 
     console.log(
@@ -1235,7 +1304,7 @@ async function main() {
     );
 
     console.log(
-      '市場監視台帳へ新着送信'
+      '市場監視台帳へ接続'
     );
 
 
@@ -1247,7 +1316,7 @@ async function main() {
 
 
     console.log(
-      '受信:',
+      '新着受信:',
       ingestResult.received,
       '新規:',
       ingestResult.inserted,
@@ -1260,7 +1329,7 @@ async function main() {
 
 
     // ========================================================
-    // 3. 既存Yahoo商品を詳細ページで直接追跡
+    // ② 既存Yahoo価格追跡
     // ========================================================
 
     await trackExistingYahooItems(
