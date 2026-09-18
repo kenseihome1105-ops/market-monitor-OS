@@ -3,11 +3,8 @@ const { chromium } = require('playwright');
 const YAHOO_URL =
   'https://auctions.yahoo.co.jp/search/search?p=グッチ+スーツ&auccat=23176&va=グッチ+スーツ&aucmaxprice=29000&is_postage_mode=1&dest_pref_code=40&b=1&n=50&s1=new&o1=d';
 
-const MARKET_INGEST_URL =
-  process.env.MARKET_INGEST_URL;
-
-const MARKET_INGEST_SECRET =
-  process.env.MARKET_INGEST_SECRET;
+const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
+const MARKET_INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
 
 const MARKET = 'ヤフオク';
 const CONDITION_ID = 'Y-01';
@@ -21,22 +18,18 @@ const MAX_ITEMS = 10;
 async function sendToAppsScript(items) {
 
   if (!MARKET_INGEST_URL) {
-    throw new Error(
-      'MARKET_INGEST_URL が設定されていません'
-    );
+    throw new Error('MARKET_INGEST_URL が設定されていません');
   }
 
   if (!MARKET_INGEST_SECRET) {
-    throw new Error(
-      'MARKET_INGEST_SECRET が設定されていません'
-    );
+    throw new Error('MARKET_INGEST_SECRET が設定されていません');
   }
 
   const payload = {
     secret: MARKET_INGEST_SECRET,
     market: MARKET,
     conditionId: CONDITION_ID,
-    items: items
+    items
   };
 
   const response = await fetch(
@@ -51,50 +44,33 @@ async function sendToAppsScript(items) {
     }
   );
 
-  const text =
-    await response.text();
+  const text = await response.text();
 
-  console.log(
-    'Apps Script HTTP:',
-    response.status
-  );
-
-  console.log(
-    'Apps Script Response:',
-    text
-  );
+  console.log('Apps Script HTTP:', response.status);
+  console.log('Apps Script Response:', text);
 
   let result;
 
   try {
-
-    result =
-      JSON.parse(text);
-
+    result = JSON.parse(text);
   } catch (error) {
-
     throw new Error(
       'Apps Script応答がJSONではありません'
     );
-
   }
 
   if (!response.ok) {
-
     throw new Error(
       'Apps Script HTTP送信失敗: ' +
       response.status
     );
-
   }
 
   if (!result.ok) {
-
     throw new Error(
       'Apps Script応答エラー: ' +
       text
     );
-
   }
 
   return result;
@@ -102,7 +78,7 @@ async function sendToAppsScript(items) {
 
 
 // ============================================================
-// メイン
+// Yahoo監視本体
 // ============================================================
 
 async function main() {
@@ -116,40 +92,53 @@ async function main() {
 
     const context =
       await browser.newContext({
+
         locale: 'ja-JP',
-        timezoneId: 'Asia/Tokyo',
+
+        timezoneId:
+          'Asia/Tokyo',
 
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
           'AppleWebKit/537.36 (KHTML, like Gecko) ' +
           'Chrome/140.0.0.0 Safari/537.36'
+
       });
 
     const page =
       await context.newPage();
 
+
     console.log(
       'Yahoo!オークションを開きます'
     );
 
+
     await page.goto(
       YAHOO_URL,
       {
-        waitUntil: 'domcontentloaded',
-        timeout: 60000
+        waitUntil:
+          'domcontentloaded',
+
+        timeout:
+          60000
       }
     );
+
 
     await page.waitForSelector(
       'li.Product',
       {
-        timeout: 60000
+        timeout:
+          60000
       }
     );
+
 
     await page.waitForTimeout(
       2000
     );
+
 
     console.log(
       '現在URL:',
@@ -163,7 +152,7 @@ async function main() {
 
 
     // ========================================================
-    // 1商品 = li.Product 単位で取得
+    // 商品カード解析
     // ========================================================
 
     const items =
@@ -172,11 +161,17 @@ async function main() {
 
           function clean(text) {
 
-            return String(text || '')
-              .replace(/\s+/g, ' ')
+            return String(
+              text || ''
+            )
+              .replace(
+                /\s+/g,
+                ' '
+              )
               .trim();
 
           }
+
 
           const cards =
             Array.from(
@@ -185,12 +180,22 @@ async function main() {
               )
             );
 
-          const results = [];
-          const seen = new Set();
+
+          const results =
+            [];
+
+          const seen =
+            new Set();
+
 
           for (
-            const card of cards
+            const card
+            of cards
           ) {
+
+            // ------------------------------------------
+            // 商品URL / 商品ID
+            // ------------------------------------------
 
             const auctionAnchors =
               Array.from(
@@ -200,24 +205,27 @@ async function main() {
               );
 
 
-            // --------------------------------------------
-            // URL / 出品ID
-            // --------------------------------------------
+            let href =
+              '';
 
-            let href = '';
-            let itemId = '';
+            let itemId =
+              '';
+
 
             for (
-              const anchor of auctionAnchors
+              const anchor
+              of auctionAnchors
             ) {
 
               const candidate =
-                anchor.href || '';
+                anchor.href ||
+                '';
 
               const match =
                 candidate.match(
                   /\/jp\/auction\/([A-Za-z0-9_-]+)/
                 );
+
 
               if (match) {
 
@@ -233,9 +241,12 @@ async function main() {
 
             }
 
+
             if (
-              !href ||
-              !itemId ||
+              !href
+              ||
+              !itemId
+              ||
               seen.has(itemId)
             ) {
 
@@ -244,25 +255,41 @@ async function main() {
             }
 
 
-            // --------------------------------------------
-            // タイトル
-            // 同じ商品カード内部だけを見る
-            // --------------------------------------------
+            // ------------------------------------------
+            // 商品名
+            // ------------------------------------------
 
             const titleCandidates =
               auctionAnchors
+
                 .map(
                   anchor => {
 
                     return clean(
-                      anchor.getAttribute('title') ||
-                      anchor.getAttribute('aria-label') ||
-                      anchor.innerText ||
+
+                      anchor.getAttribute(
+                        'title'
+                      )
+
+                      ||
+
+                      anchor.getAttribute(
+                        'aria-label'
+                      )
+
+                      ||
+
+                      anchor.innerText
+
+                      ||
+
                       ''
+
                     );
 
                   }
                 )
+
                 .filter(
                   text => {
 
@@ -271,37 +298,45 @@ async function main() {
                     }
 
                     if (
-                      text === '送料無料' ||
-                      text === '鑑定付き' ||
-                      text === 'New!!' ||
+                      text === '送料無料'
+                      ||
+                      text === '鑑定付き'
+                      ||
+                      text === 'New!!'
+                      ||
                       text === 'ウォッチ'
                     ) {
+
                       return false;
+
                     }
 
                     if (
                       /^(現在|即決)\s*[\d,]+円/
                         .test(text)
                     ) {
+
                       return false;
+
                     }
 
                     return true;
 
                   }
                 )
+
                 .sort(
                   (a, b) =>
-                    b.length - a.length
+                    b.length -
+                    a.length
                 );
 
 
             let title =
-              titleCandidates[0] || '';
+              titleCandidates[0] ||
+              '';
 
 
-            // タイトルリンクで取れない場合
-            // img altを補助使用
             if (!title) {
 
               const image =
@@ -323,24 +358,26 @@ async function main() {
             }
 
 
-            // --------------------------------------------
+            // ------------------------------------------
             // 現在価格
-            // 必ず同じ li.Product の中だけ
-            // --------------------------------------------
+            // ------------------------------------------
 
             const cardText =
               clean(
                 card.innerText
               );
 
-            let price = 0;
+
+            let price =
+              0;
+
 
             let priceMatch =
               cardText.match(
                 /現在\s*([\d,]+)\s*円/
               );
 
-            // 現在価格がない場合だけ即決価格
+
             if (!priceMatch) {
 
               priceMatch =
@@ -349,6 +386,7 @@ async function main() {
                 );
 
             }
+
 
             if (priceMatch) {
 
@@ -364,31 +402,56 @@ async function main() {
             }
 
 
-            // --------------------------------------------
-            // 安全フィルター
-            // --------------------------------------------
+            // ------------------------------------------
+            // 残り時間
+            // 例:
+            // 5日
+            // 16時間
+            // 25分
+            // ------------------------------------------
+
+            const remainingTime =
+              clean(
+
+                card
+                  .querySelector(
+                    '.Product__timeRemaining'
+                  )
+                  ?.innerText
+
+                ||
+
+                ''
+
+              );
+
+
+            // ------------------------------------------
+            // 安全監査
+            // ------------------------------------------
 
             if (!title) {
               continue;
             }
 
-            // 検索結果ページ全体を誤取得した場合の防止
             if (
-              title.length > 250
+              title.length >
+              250
             ) {
               continue;
             }
 
             if (
-              !price ||
+              !price
+              ||
               price <= 0
             ) {
               continue;
             }
 
-            // Y-01は29,000円以下
             if (
-              price > 29000
+              price >
+              29000
             ) {
               continue;
             }
@@ -405,11 +468,20 @@ async function main() {
               itemId
             );
 
+
             results.push({
-              itemId: itemId,
-              url: href,
-              title: title,
-              price: price
+
+              itemId,
+
+              url:
+                href,
+
+              title,
+
+              price,
+
+              remainingTime
+
             });
 
 
@@ -417,10 +489,13 @@ async function main() {
               results.length >=
               MAX_ITEMS
             ) {
+
               break;
+
             }
 
           }
+
 
           return results;
 
@@ -431,13 +506,14 @@ async function main() {
 
 
     // ========================================================
-    // 取得結果ログ
+    // ログ確認
     // ========================================================
 
     console.log(
       '取得商品数:',
       items.length
     );
+
 
     items.forEach(
       (item, index) => {
@@ -462,6 +538,11 @@ async function main() {
         );
 
         console.log(
+          '残り時間:',
+          item.remainingTime
+        );
+
+        console.log(
           'URL:',
           item.url
         );
@@ -469,10 +550,6 @@ async function main() {
       }
     );
 
-
-    // ========================================================
-    // 送信前の最終安全監査
-    // ========================================================
 
     if (
       items.length === 0
@@ -484,25 +561,49 @@ async function main() {
 
     }
 
+
+    // ========================================================
+    // 最終安全監査
+    // ========================================================
+
     const suspicious =
       items.filter(
-        item => {
+        item =>
 
-          return (
-            !item.itemId ||
-            !item.url ||
-            !item.title ||
-            item.title.length > 250 ||
-            !item.price ||
-            item.price <= 0 ||
-            item.price > 29000
-          );
+          !item.itemId
 
-        }
+          ||
+
+          !item.url
+
+          ||
+
+          !item.title
+
+          ||
+
+          item.title.length >
+            250
+
+          ||
+
+          !item.price
+
+          ||
+
+          item.price <= 0
+
+          ||
+
+          item.price >
+            29000
+
       );
 
+
     if (
-      suspicious.length > 0
+      suspicious.length >
+      0
     ) {
 
       throw new Error(
@@ -516,14 +617,11 @@ async function main() {
       '✅ parser安全監査OK'
     );
 
+
     console.log(
       '市場監視台帳へ送信します'
     );
 
-
-    // ========================================================
-    // market-ingestへ送信
-    // ========================================================
 
     const result =
       await sendToAppsScript(
@@ -546,6 +644,7 @@ async function main() {
       result.updated
     );
 
+
     console.log(
       '=============================='
     );
@@ -553,7 +652,6 @@ async function main() {
     console.log(
       '✅ Yahoo Market Monitor SUCCESS'
     );
-
 
   } finally {
 
@@ -564,18 +662,21 @@ async function main() {
 }
 
 
-main().catch(
-  error => {
+main()
+  .catch(
+    error => {
 
-    console.error(
-      'YAHOO MONITOR ERROR'
-    );
+      console.error(
+        'YAHOO MONITOR ERROR'
+      );
 
-    console.error(
-      error
-    );
+      console.error(
+        error
+      );
 
-    process.exit(1);
+      process.exit(
+        1
+      );
 
-  }
-);
+    }
+  );
