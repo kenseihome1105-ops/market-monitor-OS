@@ -1,0 +1,11 @@
+{
+  "name": "market-monitor-os",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "monitor": "node monitor.js"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}
