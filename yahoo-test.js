@@ -92,18 +92,15 @@ async function main() {
 
     const context =
       await browser.newContext({
-
         locale: 'ja-JP',
-
-        timezoneId:
-          'Asia/Tokyo',
+        timezoneId: 'Asia/Tokyo',
 
         userAgent:
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
           'AppleWebKit/537.36 (KHTML, like Gecko) ' +
           'Chrome/140.0.0.0 Safari/537.36'
-
       });
+
 
     const page =
       await context.newPage();
@@ -117,22 +114,41 @@ async function main() {
     await page.goto(
       YAHOO_URL,
       {
-        waitUntil:
-          'domcontentloaded',
-
-        timeout:
-          60000
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
       }
     );
 
 
-    await page.waitForSelector(
-      'li.Product',
-      {
-        timeout:
-          60000
-      }
-    );
+    // 商品カード待機
+    try {
+
+      await page.waitForSelector(
+        'li.Product',
+        {
+          timeout: 30000
+        }
+      );
+
+    } catch (error) {
+
+      console.log(
+        '商品カード初回待機失敗。再読み込みします'
+      );
+
+      await page.reload({
+        waitUntil: 'domcontentloaded',
+        timeout: 60000
+      });
+
+      await page.waitForSelector(
+        'li.Product',
+        {
+          timeout: 30000
+        }
+      );
+
+    }
 
 
     await page.waitForTimeout(
@@ -193,9 +209,9 @@ async function main() {
             of cards
           ) {
 
-            // ------------------------------------------
+            // ==================================================
             // 商品URL / 商品ID
-            // ------------------------------------------
+            // ==================================================
 
             const auctionAnchors =
               Array.from(
@@ -218,8 +234,8 @@ async function main() {
             ) {
 
               const candidate =
-                anchor.href ||
-                '';
+                anchor.href || '';
+
 
               const match =
                 candidate.match(
@@ -243,10 +259,8 @@ async function main() {
 
 
             if (
-              !href
-              ||
-              !itemId
-              ||
+              !href ||
+              !itemId ||
               seen.has(itemId)
             ) {
 
@@ -255,9 +269,9 @@ async function main() {
             }
 
 
-            // ------------------------------------------
+            // ==================================================
             // 商品名
-            // ------------------------------------------
+            // ==================================================
 
             const titleCandidates =
               auctionAnchors
@@ -297,19 +311,18 @@ async function main() {
                       return false;
                     }
 
+
                     if (
-                      text === '送料無料'
-                      ||
-                      text === '鑑定付き'
-                      ||
-                      text === 'New!!'
-                      ||
+                      text === '送料無料' ||
+                      text === '鑑定付き' ||
+                      text === 'New!!' ||
                       text === 'ウォッチ'
                     ) {
 
                       return false;
 
                     }
+
 
                     if (
                       /^(現在|即決)\s*[\d,]+円/
@@ -319,6 +332,7 @@ async function main() {
                       return false;
 
                     }
+
 
                     return true;
 
@@ -333,8 +347,7 @@ async function main() {
 
 
             let title =
-              titleCandidates[0] ||
-              '';
+              titleCandidates[0] || '';
 
 
             if (!title) {
@@ -343,6 +356,7 @@ async function main() {
                 card.querySelector(
                   'img[alt]'
                 );
+
 
               if (image) {
 
@@ -358,15 +372,19 @@ async function main() {
             }
 
 
-            // ------------------------------------------
-            // 現在価格
-            // ------------------------------------------
+            // ==================================================
+            // 商品カード全文
+            // ==================================================
 
             const cardText =
               clean(
                 card.innerText
               );
 
+
+            // ==================================================
+            // 現在価格
+            // ==================================================
 
             let price =
               0;
@@ -402,57 +420,106 @@ async function main() {
             }
 
 
-            // ------------------------------------------
+            // ==================================================
             // 残り時間
+            //
             // 例:
             // 5日
             // 16時間
             // 25分
-            // ------------------------------------------
+            // ==================================================
 
             let remainingTime =
-  clean(
-    card
-      .querySelector(
-        '.Product__timeRemaining'
-      )
-      ?.innerText
-    ||
-    ''
-  );
+              '';
 
-if (!remainingTime) {
 
-  const timeInfoText =
-    clean(
-      card
-        .querySelector(
-          '.Product__timeInfo'
-        )
-        ?.innerText
-      ||
-      ''
-    );
+            // 第一候補
+            const remainingElement =
+              card.querySelector(
+                '.Product__timeRemaining, [class*="timeRemaining"]'
+              );
 
-  const timeMatch =
-    timeInfoText.match(
-      /(\d+\s*(?:日|時間|分))/
-    );
 
-  if (timeMatch) {
-    remainingTime =
-      clean(timeMatch[1]);
-  }
+            if (remainingElement) {
 
-}
+              remainingTime =
+                clean(
+                  remainingElement.innerText ||
+                  remainingElement.textContent ||
+                  ''
+                );
 
-            // ------------------------------------------
+            }
+
+
+            // 第二候補
+            if (!remainingTime) {
+
+              const timeInfo =
+                card.querySelector(
+                  '.Product__timeInfo, [class*="timeInfo"]'
+                );
+
+
+              const timeInfoText =
+                clean(
+                  timeInfo
+                    ? (
+                        timeInfo.innerText ||
+                        timeInfo.textContent ||
+                        ''
+                      )
+                    : ''
+                );
+
+
+              const timeMatch =
+                timeInfoText.match(
+                  /(\d+\s*(?:日|時間|分))/
+                );
+
+
+              if (timeMatch) {
+
+                remainingTime =
+                  clean(
+                    timeMatch[1]
+                  );
+
+              }
+
+            }
+
+
+            // 最後の保険
+            if (!remainingTime) {
+
+              const cardTimeMatch =
+                cardText.match(
+                  /(?:^|\s)(\d+\s*(?:日|時間|分))(?:\s|$)/
+                );
+
+
+              if (cardTimeMatch) {
+
+                remainingTime =
+                  clean(
+                    cardTimeMatch[1]
+                  );
+
+              }
+
+            }
+
+
+            // ==================================================
             // 安全監査
-            // ------------------------------------------
+            // ==================================================
 
             if (!title) {
               continue;
             }
+
 
             if (
               title.length >
@@ -461,13 +528,14 @@ if (!remainingTime) {
               continue;
             }
 
+
             if (
-              !price
-              ||
+              !price ||
               price <= 0
             ) {
               continue;
             }
+
 
             if (
               price >
@@ -476,11 +544,14 @@ if (!remainingTime) {
               continue;
             }
 
+
             if (
               !/^https:\/\/auctions\.yahoo\.co\.jp\/jp\/auction\//
                 .test(href)
             ) {
+
               continue;
+
             }
 
 
@@ -559,7 +630,7 @@ if (!remainingTime) {
 
         console.log(
           '残り時間:',
-          item.remainingTime
+          item.remainingTime || '取得なし'
         );
 
         console.log(
@@ -617,7 +688,6 @@ if (!remainingTime) {
 
           item.price >
             29000
-
       );
 
 
@@ -672,6 +742,7 @@ if (!remainingTime) {
     console.log(
       '✅ Yahoo Market Monitor SUCCESS'
     );
+
 
   } finally {
 
