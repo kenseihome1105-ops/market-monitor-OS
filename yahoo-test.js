@@ -410,21 +410,41 @@ async function main() {
             // 25分
             // ------------------------------------------
 
-            const remainingTime =
-              clean(
+            let remainingTime =
+  clean(
+    card
+      .querySelector(
+        '.Product__timeRemaining'
+      )
+      ?.innerText
+    ||
+    ''
+  );
 
-                card
-                  .querySelector(
-                    '.Product__timeRemaining'
-                  )
-                  ?.innerText
+if (!remainingTime) {
 
-                ||
+  const timeInfoText =
+    clean(
+      card
+        .querySelector(
+          '.Product__timeInfo'
+        )
+        ?.innerText
+      ||
+      ''
+    );
 
-                ''
+  const timeMatch =
+    timeInfoText.match(
+      /(\d+\s*(?:日|時間|分))/
+    );
 
-              );
+  if (timeMatch) {
+    remainingTime =
+      clean(timeMatch[1]);
+  }
 
+}
 
             // ------------------------------------------
             // 安全監査
