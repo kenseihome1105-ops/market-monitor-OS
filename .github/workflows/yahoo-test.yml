@@ -2,8 +2,10 @@ name: Yahoo Test
 
 on:
   workflow_dispatch:
-
-jobs:
+  schedule:
+    - cron: '4-59/5 * * * *'
+    
+    jobs:
   yahoo-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
