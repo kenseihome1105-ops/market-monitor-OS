@@ -24,4 +24,7 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run Yahoo test
+        env:
+          MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+          MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
         run: node yahoo-test.js
