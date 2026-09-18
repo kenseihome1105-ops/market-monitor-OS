@@ -268,10 +268,12 @@ async function main() {
             // ----------------------------------
 
             const priceMatch =
-              bestText.match(
-                /(?:¥|￥)\s*([\d,]+)/
-              );
-
+  bestText.match(
+    /(?:¥|￥)\s*([\d,]+)/
+  ) ||
+  bestText.match(
+    /([\d,]+)\s*円/
+  );
             if (
               !priceMatch
             ) {
