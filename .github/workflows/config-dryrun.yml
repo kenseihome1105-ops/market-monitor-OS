@@ -1,0 +1,23 @@
+name: Config Dry Run
+
+on:
+  workflow_dispatch:
+
+jobs:
+  config-dryrun:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run config dry run
+        env:
+          MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+          MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+        run: node config-dryrun.js
