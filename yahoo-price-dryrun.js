@@ -65,155 +65,46 @@ async function extractCurrentPrice(page) {
     }
 
 
-    const all =
+    // ========================================================
+    // メイン商品専用の価格コンテナだけを見る
+    // おすすめ商品カードはここを持たない
+    // ========================================================
+
+    const containers =
       Array.from(
-        document.querySelectorAll('body *')
+        document.querySelectorAll(
+          'div[class*="ProductDetail__PriceInfo--container"]'
+        )
       );
 
 
-    // ========================================================
-    // 第一候補
-    // 「現在」とだけ書かれたラベルを探し、
-    // その親要素を上にたどって価格ブロックを特定
-    // ========================================================
-
-    const currentLabels =
-      all.filter(el => {
-        return clean(el.innerText) === '現在';
-      });
-
-
-    const candidates =
-      [];
-
-
     for (
-      const label
-      of currentLabels
+      const container
+      of containers
     ) {
 
-      let node =
-        label.parentElement;
+      const currentLabel =
+        container.querySelector(
+          'span[class*="Price__PriceText--current"]'
+        );
 
 
-      for (
-        let depth = 0;
-        depth < 6 && node;
-        depth++
-      ) {
-
-        const text =
-          clean(
-            node.innerText
-          );
+      const amountElement =
+        container.querySelector(
+          'span[class*="Price__PriceText--amount"]'
+        );
 
 
-        const match =
-          text.match(
-            /^現在\s*([\d,]+)\s*円/
-          );
-
-
-        if (
-          match
-        ) {
-
-          const price =
-            Number(
-              match[1]
-                .replace(/,/g, '')
-            );
-
-
-          if (
-            Number.isFinite(price) &&
-            price > 0 &&
-            text.length <= 150
-          ) {
-
-            candidates.push({
-              price,
-              sourceText: text,
-              depth
-            });
-
-          }
-
-        }
-
-
-        node =
-          node.parentElement;
-
-      }
-
-    }
-
-
-    // 一番小さい価格ブロックを採用
-    if (
-      candidates.length > 0
-    ) {
-
-      candidates.sort(
-        (a, b) => {
-
-          if (
-            a.sourceText.length !==
-            b.sourceText.length
-          ) {
-
-            return (
-              a.sourceText.length -
-              b.sourceText.length
-            );
-
-          }
-
-
-          return (
-            a.depth -
-            b.depth
-          );
-
-        }
-      );
-
-
-      return {
-        ok: true,
-        price: candidates[0].price,
-        sourceText: candidates[0].sourceText,
-        method: 'CURRENT_LABEL_PARENT'
-      };
-
-    }
-
-
-    // ========================================================
-    // 第二候補
-    // 小さいDOM要素の中で
-    // 「現在 20,000円」形式そのものを探す
-    // ========================================================
-
-    const directCandidates =
-      [];
-
-
-    for (
-      const el
-      of all
-    ) {
-
-      const text =
-        clean(
-          el.innerText
+      const currencyElement =
+        container.querySelector(
+          'span[class*="Price__PriceText--currency"]'
         );
 
 
       if (
-        !text ||
-        text.length > 120
+        !currentLabel ||
+        !amountElement ||
+        !currencyElement
       ) {
 
         continue;
@@ -221,14 +112,47 @@ async function extractCurrentPrice(page) {
       }
 
 
-      const match =
-        text.match(
-          /^現在\s*([\d,]+)\s*円/
+      const label =
+        clean(
+          currentLabel.innerText
+        );
+
+
+      const amountText =
+        clean(
+          amountElement.innerText
+        );
+
+
+      const currency =
+        clean(
+          currencyElement.innerText
         );
 
 
       if (
-        !match
+        label !== '現在'
+      ) {
+
+        continue;
+
+      }
+
+
+      if (
+        currency !== '円'
+      ) {
+
+        continue;
+
+      }
+
+
+      if (
+        !/^[\d,]+$/
+          .test(
+            amountText
+          )
       ) {
 
         continue;
@@ -238,7 +162,7 @@ async function extractCurrentPrice(page) {
 
       const price =
         Number(
-          match[1]
+          amountText
             .replace(/,/g, '')
         );
 
@@ -253,58 +177,52 @@ async function extractCurrentPrice(page) {
       }
 
 
-      directCandidates.push({
-        price,
-        sourceText: text
-      });
-
-    }
-
-
-    if (
-      directCandidates.length > 0
-    ) {
-
-      directCandidates.sort(
-        (a, b) =>
-          a.sourceText.length -
-          b.sourceText.length
-      );
-
-
       return {
+
         ok: true,
-        price: directCandidates[0].price,
-        sourceText: directCandidates[0].sourceText,
-        method: 'DIRECT_CURRENT_BLOCK'
+
+        price,
+
+        sourceText:
+          clean(
+            container.innerText
+          ),
+
+        method:
+          'MAIN_PRODUCT_PRICE_CONTAINER'
+
       };
 
     }
 
 
     // ========================================================
-    // 見つからなければデバッグ情報だけ返す
+    // メイン価格欄が取れなかった場合は
+    // 絶対に他の価格へフォールバックしない
     // ========================================================
 
-    const debugTexts =
-      all
-        .map(el =>
-          clean(el.innerText)
-        )
-        .filter(text =>
-          text &&
-          text.includes('現在') &&
-          text.length <= 200
-        )
-        .slice(0, 10);
-
-
     return {
+
       ok: false,
+
       price: 0,
+
       sourceText: '',
+
       method: '',
-      debugTexts
+
+      debug: {
+
+        priceContainerCount:
+          containers.length,
+
+        bidButtonCount:
+          document.querySelectorAll(
+            'button[class*="ProductDetail__Action--bid"]'
+          ).length
+
+      }
+
     };
 
   });
@@ -325,7 +243,8 @@ async function main() {
     const context =
       await browser.newContext({
 
-        locale: 'ja-JP',
+        locale:
+          'ja-JP',
 
         timezoneId:
           'Asia/Tokyo',
@@ -401,12 +320,12 @@ async function main() {
 
         if (
           result &&
-          result.debugTexts
+          result.debug
         ) {
 
           console.log(
             'DEBUG:',
-            result.debugTexts
+            result.debug
           );
 
         }
@@ -441,8 +360,8 @@ async function main() {
 
 
       // ======================================================
-      // Yahooオークション価格は通常下がらない。
-      // 台帳価格未満なら誤取得として拒否。
+      // Yahooオークション価格は通常下がらない
+      // 台帳価格未満なら誤取得として拒否
       // ======================================================
 
       if (
