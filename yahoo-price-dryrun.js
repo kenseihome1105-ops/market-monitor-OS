@@ -54,7 +54,7 @@ const TEST_ITEMS = [
 ];
 
 
-async function extractCurrentPrice(page) {
+async function extractMainPrice(page) {
 
   return await page.evaluate(() => {
 
@@ -65,270 +65,67 @@ async function extractCurrentPrice(page) {
     }
 
 
-    function findPriceInside(root) {
+    function isAfter(a, b) {
 
-      if (!root) {
-        return null;
-      }
-
-
-      const elements =
-        Array.from(
-          root.querySelectorAll('*')
-        );
-
-
-      const labels =
-        elements.filter(el => {
-          return clean(el.innerText) === '現在';
-        });
-
-
-      const candidates =
-        [];
-
-
-      for (const label of labels) {
-
-        let node =
-          label.parentElement;
-
-
-        for (
-          let depth = 0;
-          depth < 7 && node;
-          depth++
-        ) {
-
-          if (
-            !root.contains(node)
-          ) {
-            break;
-          }
-
-
-          const text =
-            clean(
-              node.innerText
-            );
-
-
-          const match =
-            text.match(
-              /^現在\s*([\d,]+)\s*円/
-            );
-
-
-          if (match) {
-
-            const price =
-              Number(
-                match[1]
-                  .replace(/,/g, '')
-              );
-
-
-            if (
-              Number.isFinite(price) &&
-              price > 0 &&
-              text.length <= 150
-            ) {
-
-              candidates.push({
-
-                price,
-
-                sourceText:
-                  text,
-
-                textLength:
-                  text.length,
-
-                depth
-
-              });
-
-            }
-
-          }
-
-
-          node =
-            node.parentElement;
-
-        }
-
-      }
-
-
-      if (
-        candidates.length === 0
-      ) {
-
-        return null;
-
-      }
-
-
-      candidates.sort(
-        (a, b) => {
-
-          if (
-            a.textLength !==
-            b.textLength
-          ) {
-
-            return (
-              a.textLength -
-              b.textLength
-            );
-
-          }
-
-
-          return (
-            a.depth -
-            b.depth
-          );
-
-        }
+      return Boolean(
+        b.compareDocumentPosition(a) &
+        Node.DOCUMENT_POSITION_FOLLOWING
       );
 
+    }
 
-      return candidates[0];
+
+    function isBefore(a, b) {
+
+      return Boolean(
+        b.compareDocumentPosition(a) &
+        Node.DOCUMENT_POSITION_PRECEDING
+      );
 
     }
 
 
     // ========================================================
-    // ① h1の商品タイトルから親を上へ辿る
-    //
-    // 「入札する」ボタンと「現在」が両方ある
-    // 最小エリアを本体商品エリアとする
+    // ① 商品タイトル
     // ========================================================
 
-    const h1s =
+    const h1 =
       Array.from(
         document.querySelectorAll('h1')
       )
-        .filter(el =>
+        .find(el =>
           clean(el.innerText)
         );
 
 
-    for (const h1 of h1s) {
+    if (!h1) {
 
-      let root =
-        h1;
-
-
-      for (
-        let depth = 0;
-        depth < 12;
-        depth++
-      ) {
-
-        root =
-          root.parentElement;
-
-
-        if (!root) {
-          break;
-        }
-
-
-        const actionElements =
-          Array.from(
-            root.querySelectorAll(
-              'button, a'
-            )
-          );
-
-
-        const hasBidButton =
-          actionElements.some(el => {
-
-            const text =
-              clean(
-                el.innerText
-              );
-
-
-            return (
-              text === '入札する' ||
-              text.startsWith('入札')
-            );
-
-          });
-
-
-        if (!hasBidButton) {
-          continue;
-        }
-
-
-        const hasCurrentLabel =
-          Array.from(
-            root.querySelectorAll('*')
-          )
-            .some(el =>
-              clean(el.innerText) ===
-              '現在'
-            );
-
-
-        if (!hasCurrentLabel) {
-          continue;
-        }
-
-
-        const result =
-          findPriceInside(root);
-
-
-        if (result) {
-
-          return {
-
-            ok: true,
-
-            price:
-              result.price,
-
-            sourceText:
-              result.sourceText,
-
-            method:
-              'H1_AND_BID_AREA',
-
-            title:
-              clean(
-                h1.innerText
-              )
-
-          };
-
-        }
-
-      }
+      return {
+        ok: false,
+        reason: 'H1_NOT_FOUND'
+      };
 
     }
 
 
     // ========================================================
-    // ② h1側で見つからない場合
+    // ② 本体アクションボタン
     //
-    // 「入札する」ボタンから親を上へ辿り、
-    // 現在価格を含む最小エリアだけを見る
+    // このボタンより後ろにある価格は絶対に使わない
     // ========================================================
 
-    const bidButtons =
+    const actionCandidates =
       Array.from(
         document.querySelectorAll(
           'button, a'
         )
       )
         .filter(el => {
+
+          if (!isAfter(el, h1)) {
+            return false;
+          }
+
 
           const text =
             clean(
@@ -338,137 +135,390 @@ async function extractCurrentPrice(page) {
 
           return (
             text === '入札する' ||
-            text.startsWith('入札')
+            text === '今すぐ落札' ||
+            text === '落札する' ||
+            text === '購入する' ||
+            text === '購入手続きへ' ||
+            text.startsWith('入札する') ||
+            text.startsWith('今すぐ落札')
           );
 
         });
 
 
-    for (const button of bidButtons) {
-
-      let root =
-        button;
+    const actionButton =
+      actionCandidates[0] || null;
 
 
-      for (
-        let depth = 0;
-        depth < 10;
-        depth++
+    // ========================================================
+    // ③ おすすめ欄開始位置
+    //
+    // アクションボタンが取れない場合の安全弁
+    // ========================================================
+
+    const recommendationWords = [
+      'この商品も注目されています',
+      '見た目が似ている商品',
+      'お探しの商品からのおすすめ',
+      '似た商品を見る',
+      'ブランドランキング'
+    ];
+
+
+    const recommendationHeading =
+      Array.from(
+        document.querySelectorAll(
+          'h2, h3, h4'
+        )
+      )
+        .filter(el => {
+
+          if (!isAfter(el, h1)) {
+            return false;
+          }
+
+
+          const text =
+            clean(
+              el.innerText
+            );
+
+
+          return recommendationWords.some(
+            word =>
+              text.includes(word)
+          );
+
+        })[0] || null;
+
+
+    // ========================================================
+    // ④ 本体範囲
+    //
+    // h1の後ろ
+    // かつ
+    // 本体アクションボタンより前
+    //
+    // ボタンがなければおすすめ欄より前
+    // ========================================================
+
+    const boundary =
+      actionButton ||
+      recommendationHeading ||
+      null;
+
+
+    const allElements =
+      Array.from(
+        document.querySelectorAll(
+          'body *'
+        )
+      );
+
+
+    const candidates =
+      [];
+
+
+    for (
+      let index = 0;
+      index < allElements.length;
+      index++
+    ) {
+
+      const el =
+        allElements[index];
+
+
+      if (
+        el === h1 ||
+        !isAfter(el, h1)
       ) {
 
-        root =
-          root.parentElement;
+        continue;
+
+      }
 
 
-        if (!root) {
-          break;
+      if (
+        boundary &&
+        !isBefore(el, boundary)
+      ) {
+
+        continue;
+
+      }
+
+
+      const text =
+        clean(
+          el.innerText
+        );
+
+
+      if (
+        !text ||
+        text.length > 100
+      ) {
+
+        continue;
+
+      }
+
+
+      // ======================================================
+      // Yahoo本体価格として許可するラベル
+      //
+      // 現在 = オークション現在価格
+      // 価格 = 通常オークション価格表示
+      // 即決 = 固定/即決価格
+      // ======================================================
+
+      const match =
+        text.match(
+          /^(現在|価格|即決)\s*([\d,]+)\s*円(?:\s*[（(][^）)]*[）)])?$/
+        );
+
+
+      if (!match) {
+        continue;
+      }
+
+
+      const label =
+        match[1];
+
+
+      const price =
+        Number(
+          match[2]
+            .replace(/,/g, '')
+        );
+
+
+      if (
+        !Number.isFinite(price) ||
+        price <= 0
+      ) {
+
+        continue;
+
+      }
+
+
+      candidates.push({
+
+        label,
+
+        price,
+
+        sourceText:
+          text,
+
+        domIndex:
+          index,
+
+        textLength:
+          text.length
+
+      });
+
+    }
+
+
+    // ========================================================
+    // ⑤ 候補なし
+    // ========================================================
+
+    if (
+      candidates.length === 0
+    ) {
+
+      return {
+
+        ok: false,
+
+        reason:
+          'MAIN_PRICE_NOT_FOUND',
+
+        debug: {
+
+          pageTitle:
+            document.title,
+
+          currentUrl:
+            location.href,
+
+          h1:
+            clean(
+              h1.innerText
+            ),
+
+          actionButton:
+            actionButton
+              ? clean(
+                  actionButton.innerText
+                )
+              : '',
+
+          recommendationHeading:
+            recommendationHeading
+              ? clean(
+                  recommendationHeading.innerText
+                )
+              : '',
+
+          bodyPreview:
+            clean(
+              document.body.innerText
+            ).slice(
+              0,
+              1000
+            )
+
         }
 
+      };
 
-        const result =
-          findPriceInside(root);
+    }
 
 
-        if (result) {
+    // ========================================================
+    // ⑥ 重複排除
+    //
+    // span / div / 親要素などで
+    // 同じ価格が複数回取れることがある
+    // ========================================================
 
-          return {
+    const uniqueMap =
+      new Map();
 
-            ok: true,
 
-            price:
-              result.price,
+    for (
+      const candidate
+      of candidates
+    ) {
 
-            sourceText:
-              result.sourceText,
+      const key =
+        `${candidate.label}:${candidate.price}`;
 
-            method:
-              'BID_BUTTON_AREA',
 
-            title:
-              ''
+      const previous =
+        uniqueMap.get(
+          key
+        );
 
-          };
 
-        }
+      if (
+        !previous ||
+        candidate.textLength <
+        previous.textLength
+      ) {
+
+        uniqueMap.set(
+          key,
+          candidate
+        );
 
       }
 
     }
 
 
+    const uniqueCandidates =
+      Array.from(
+        uniqueMap.values()
+      );
+
+
     // ========================================================
-    // 取得失敗時の診断
+    // ⑦ 優先順位
     //
-    // 価格としては絶対採用しない
+    // 現在価格があれば最優先
+    // ↓
+    // 通常の「価格」
+    // ↓
+    // 即決のみの商品は即決価格
     // ========================================================
 
-    const exactCurrentCount =
-      Array.from(
-        document.querySelectorAll('*')
-      )
-        .filter(el =>
-          clean(el.innerText) ===
-          '現在'
-        )
-        .length;
+    const priority = {
+      '現在': 1,
+      '価格': 2,
+      '即決': 3
+    };
 
 
-    const h1Texts =
-      h1s
-        .map(el =>
-          clean(el.innerText)
-        )
-        .slice(0, 5);
+    uniqueCandidates.sort(
+      (a, b) => {
+
+        const priorityDiff =
+          priority[a.label] -
+          priority[b.label];
 
 
-    const actionTexts =
-      Array.from(
-        document.querySelectorAll(
-          'button, a'
-        )
-      )
-        .map(el =>
-          clean(el.innerText)
-        )
-        .filter(text =>
-          text.includes('入札')
-        )
-        .slice(0, 10);
+        if (
+          priorityDiff !== 0
+        ) {
+
+          return priorityDiff;
+
+        }
+
+
+        return (
+          a.domIndex -
+          b.domIndex
+        );
+
+      }
+    );
+
+
+    const selected =
+      uniqueCandidates[0];
 
 
     return {
 
-      ok: false,
+      ok: true,
 
-      price: 0,
+      price:
+        selected.price,
 
-      sourceText: '',
+      label:
+        selected.label,
 
-      method: '',
+      sourceText:
+        selected.sourceText,
 
-      debug: {
+      method:
+        'H1_TO_MAIN_ACTION',
 
-        pageTitle:
-          document.title,
+      title:
+        clean(
+          h1.innerText
+        ),
 
-        currentUrl:
-          location.href,
+      actionButton:
+        actionButton
+          ? clean(
+              actionButton.innerText
+            )
+          : '',
 
-        h1Texts,
+      candidates:
+        uniqueCandidates.map(
+          candidate => ({
+            label:
+              candidate.label,
 
-        actionTexts,
+            price:
+              candidate.price,
 
-        exactCurrentCount,
-
-        bodyPreview:
-          clean(
-            document.body.innerText
-          ).slice(
-            0,
-            500
-          )
-
-      }
+            sourceText:
+              candidate.sourceText
+          })
+        )
 
     };
 
@@ -526,6 +576,7 @@ async function main() {
         '=============================='
       );
 
+
       console.log(
         `[${i + 1}/${TEST_ITEMS.length}]`,
         item.itemId
@@ -550,7 +601,7 @@ async function main() {
 
 
       const result =
-        await extractCurrentPrice(
+        await extractMainPrice(
           page
         );
 
@@ -561,25 +612,18 @@ async function main() {
       ) {
 
         console.log(
-          '❌ 現在価格を取得できません'
+          '❌ 本体価格を取得できません'
         );
 
 
-        if (
-          result &&
-          result.debug
-        ) {
-
-          console.log(
-            'DEBUG:',
-            JSON.stringify(
-              result.debug,
-              null,
-              2
-            )
-          );
-
-        }
+        console.log(
+          'DEBUG:',
+          JSON.stringify(
+            result,
+            null,
+            2
+          )
+        );
 
 
         failed++;
@@ -602,6 +646,12 @@ async function main() {
 
 
       console.log(
+        '価格ラベル:',
+        result.label
+      );
+
+
+      console.log(
         '取得方式:',
         result.method
       );
@@ -613,31 +663,42 @@ async function main() {
       );
 
 
-      if (
+      console.log(
+        '商品タイトル:',
         result.title
-      ) {
+      );
 
-        console.log(
-          '商品タイトル:',
-          result.title
-        );
 
-      }
+      console.log(
+        '本体ボタン:',
+        result.actionButton
+      );
+
+
+      console.log(
+        '価格候補:',
+        result.candidates
+      );
 
 
       // ======================================================
-      // オークションの現在価格が
-      // 既知価格より下がる値は拒否
+      // 現在価格/通常オークション価格は
+      // 原則として既知価格より下がらない
+      //
+      // 「即決」は出品者が価格変更できるため
+      // 下落をエラー扱いしない
       // ======================================================
 
       if (
+        result.label !== '即決' &&
         result.price <
         item.knownPrice
       ) {
 
         console.log(
-          '❌ 異常: 詳細価格が台帳価格より低い'
+          '❌ 異常: オークション価格が台帳価格より低い'
         );
+
 
         failed++;
 
