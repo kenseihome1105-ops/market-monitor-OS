@@ -167,11 +167,11 @@ async function main() {
 
 
   if (
-    configs.length !== 2
+    configs.length !== 3
   ) {
 
     throw new Error(
-      '現在のMercari ON条件は2件想定ですが、' +
+      '現在のMercari ON条件は3件想定ですが、' +
       configs.length +
       '件返りました'
     );
@@ -190,36 +190,6 @@ async function main() {
     );
 
 
-  const m01 =
-    configMap.get(
-      'M-01'
-    );
-
-
-  const m02 =
-    configMap.get(
-      'M-02'
-    );
-
-
-  if (!m01) {
-
-    throw new Error(
-      'M-01が取得できていません'
-    );
-
-  }
-
-
-  if (!m02) {
-
-    throw new Error(
-      'M-02が取得できていません'
-    );
-
-  }
-
-
   const expectedConfigs = [
     {
       conditionId:
@@ -235,6 +205,14 @@ async function main() {
 
       searchName:
         'PRADA スーツ'
+    },
+
+    {
+      conditionId:
+        'M-03',
+
+      searchName:
+        'BURBERRY スーツ'
     }
   ];
 
@@ -248,6 +226,16 @@ async function main() {
       configMap.get(
         expected.conditionId
       );
+
+
+    if (!config) {
+
+      throw new Error(
+        expected.conditionId +
+        'が取得できていません'
+      );
+
+    }
 
 
     if (
@@ -299,7 +287,7 @@ async function main() {
   );
 
   console.log(
-    '✅ M-01 / M-02 の2条件取得確認'
+    '✅ M-01 / M-02 / M-03 の3条件取得確認'
   );
 
   console.log(
