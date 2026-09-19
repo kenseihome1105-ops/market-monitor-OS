@@ -157,11 +157,11 @@ async function main() {
 
 
   if (
-    configs.length !== 1
+    configs.length !== 2
   ) {
 
     throw new Error(
-      '現在のYahoo ON条件は1件想定ですが、' +
+      '現在のYahoo ON条件は2件想定ですが、' +
       configs.length +
       '件返りました'
     );
@@ -169,39 +169,110 @@ async function main() {
   }
 
 
-  const config =
-    configs[0];
+  const configMap =
+    new Map(
+      configs.map(
+        config => [
+          config.conditionId,
+          config
+        ]
+      )
+    );
 
 
-  if (
-    config.conditionId !== 'Y-01'
-  ) {
+  const y01 =
+    configMap.get(
+      'Y-01'
+    );
+
+
+  const y02 =
+    configMap.get(
+      'Y-02'
+    );
+
+
+  if (!y01) {
 
     throw new Error(
-      'Y-01ではありません: ' +
-      config.conditionId
+      'Y-01が取得できていません'
+    );
+
+  }
+
+
+  if (!y02) {
+
+    throw new Error(
+      'Y-02が取得できていません'
     );
 
   }
 
 
   if (
-    config.market !== 'ヤフオク'
+    y01.market !== 'ヤフオク'
   ) {
 
     throw new Error(
-      '市場がヤフオクではありません'
+      'Y-01の市場がヤフオクではありません'
     );
 
   }
 
 
   if (
-    !config.searchUrl
+    y02.market !== 'ヤフオク'
   ) {
 
     throw new Error(
-      '検索URLが空です'
+      'Y-02の市場がヤフオクではありません'
+    );
+
+  }
+
+
+  if (
+    !y01.searchUrl
+  ) {
+
+    throw new Error(
+      'Y-01の検索URLが空です'
+    );
+
+  }
+
+
+  if (
+    !y02.searchUrl
+  ) {
+
+    throw new Error(
+      'Y-02の検索URLが空です'
+    );
+
+  }
+
+
+  if (
+    y01.searchName !== 'GUCCI スーツ'
+  ) {
+
+    throw new Error(
+      'Y-01の条件名が想定と違います: ' +
+      y01.searchName
+    );
+
+  }
+
+
+  if (
+    y02.searchName !== 'PRADA スーツ'
+  ) {
+
+    throw new Error(
+      'Y-02の条件名が想定と違います: ' +
+      y02.searchName
     );
 
   }
@@ -213,6 +284,10 @@ async function main() {
 
   console.log(
     '✅ 市場監視設定 Dry Run SUCCESS'
+  );
+
+  console.log(
+    '✅ Y-01 / Y-02 の2条件取得確認'
   );
 
   console.log(
