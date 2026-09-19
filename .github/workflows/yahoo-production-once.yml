@@ -1,0 +1,30 @@
+name: Yahoo Production Once
+
+on:
+  workflow_dispatch:
+
+jobs:
+  yahoo-production-once:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install packages
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Yahoo production once
+        env:
+          MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+          MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+        run: node yahoo-test.js
