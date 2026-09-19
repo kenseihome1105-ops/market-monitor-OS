@@ -157,11 +157,11 @@ async function main() {
 
 
   if (
-    configs.length !== 2
+    configs.length !== 3
   ) {
 
     throw new Error(
-      '現在のYahoo ON条件は2件想定ですが、' +
+      '現在のYahoo ON条件は3件想定ですが、' +
       configs.length +
       '件返りました'
     );
@@ -185,10 +185,14 @@ async function main() {
       'Y-01'
     );
 
-
   const y02 =
     configMap.get(
       'Y-02'
+    );
+
+  const y03 =
+    configMap.get(
+      'Y-03'
     );
 
 
@@ -210,70 +214,89 @@ async function main() {
   }
 
 
-  if (
-    y01.market !== 'ヤフオク'
-  ) {
+  if (!y03) {
 
     throw new Error(
-      'Y-01の市場がヤフオクではありません'
+      'Y-03が取得できていません'
     );
 
   }
 
 
-  if (
-    y02.market !== 'ヤフオク'
+  const expectedConfigs = [
+    {
+      conditionId:
+        'Y-01',
+
+      searchName:
+        'GUCCI スーツ'
+    },
+
+    {
+      conditionId:
+        'Y-02',
+
+      searchName:
+        'PRADA スーツ'
+    },
+
+    {
+      conditionId:
+        'Y-03',
+
+      searchName:
+        'BURBERRY スーツ'
+    }
+  ];
+
+
+  for (
+    const expected
+    of expectedConfigs
   ) {
 
-    throw new Error(
-      'Y-02の市場がヤフオクではありません'
-    );
-
-  }
-
-
-  if (
-    !y01.searchUrl
-  ) {
-
-    throw new Error(
-      'Y-01の検索URLが空です'
-    );
-
-  }
+    const config =
+      configMap.get(
+        expected.conditionId
+      );
 
 
-  if (
-    !y02.searchUrl
-  ) {
+    if (
+      config.market !== 'ヤフオク'
+    ) {
 
-    throw new Error(
-      'Y-02の検索URLが空です'
-    );
+      throw new Error(
+        expected.conditionId +
+        'の市場がヤフオクではありません'
+      );
 
-  }
-
-
-  if (
-    y01.searchName !== 'GUCCI スーツ'
-  ) {
-
-    throw new Error(
-      'Y-01の条件名が想定と違います: ' +
-      y01.searchName
-    );
-
-  }
+    }
 
 
-  if (
-    y02.searchName !== 'PRADA スーツ'
-  ) {
+    if (
+      config.searchName !==
+      expected.searchName
+    ) {
 
-    throw new Error(
-      'Y-02の条件名が想定と違います: ' +
-      y02.searchName
-    );
+      throw new Error(
+        expected.conditionId +
+        'の条件名が想定と違います: ' +
+        config.searchName
+      );
+
+    }
+
+
+    if (
+      !config.searchUrl
+    ) {
+
+      throw new Error(
+        expected.conditionId +
+        'の検索URLが空です'
+      );
+
+    }
 
   }
 
@@ -287,7 +310,7 @@ async function main() {
   );
 
   console.log(
-    '✅ Y-01 / Y-02 の2条件取得確認'
+    '✅ Y-01 / Y-02 / Y-03 の3条件取得確認'
   );
 
   console.log(
