@@ -2,28 +2,17 @@ const { chromium } = require('playwright');
 
 
 // ============================================================
-// 初期テスト設定
+// 基本設定
 //
-// まずは M-01 / GUCCI スーツだけ。
-// さらに最初は10件だけ送る。
-// 正常動作確認後に件数を増やす。
+// 検索条件は「市場監視設定」から取得する。
+// 1条件あたりの取得件数は、現在の小規模本番を維持して10件。
 // ============================================================
 
-const CONDITION = {
+const MARKET =
+  'メルカリ';
 
-  market:
-    'メルカリ',
-
-  conditionId:
-    'M-01',
-
-  searchUrl:
-    'https://jp.mercari.com/search?category_id=35&keyword=%E3%82%B0%E3%83%83%E3%83%81+%E3%82%B9%E3%83%BC%E3%83%84&order=desc&price_max=29000&sort=created_time&status=on_sale',
-
-  maxItems:
-    10
-
-};
+const MAX_SEARCH_ITEMS =
+  10;
 
 
 // ============================================================
@@ -45,6 +34,194 @@ if (
   throw new Error(
     'GitHub Secrets が設定されていません'
   );
+
+}
+
+
+// ============================================================
+// 市場監視設定取得
+//
+// market-ingest の getConfig を使用し、
+// 「市場監視設定」で ON のMercari条件だけ取得する。
+//
+// 検索URL / 条件IDはコードへ固定しない。
+// ============================================================
+
+async function getMercariConfigs() {
+
+  console.log(
+    '=============================='
+  );
+
+  console.log(
+    'Mercari 市場監視設定を取得'
+  );
+
+
+  const response =
+    await fetch(
+      INGEST_URL,
+      {
+        method:
+          'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json'
+        },
+
+        body:
+          JSON.stringify({
+            secret:
+              INGEST_SECRET,
+
+            action:
+              'getConfig',
+
+            market:
+              MARKET
+          }),
+
+        redirect:
+          'follow'
+      }
+    );
+
+
+  const text =
+    await response.text();
+
+
+  let result;
+
+
+  try {
+
+    result =
+      JSON.parse(text);
+
+  } catch (error) {
+
+    console.log(
+      'Apps Script Response:',
+      text
+    );
+
+    throw new Error(
+      'Config応答がJSONではありません'
+    );
+
+  }
+
+
+  if (!response.ok) {
+
+    throw new Error(
+      'Config HTTP失敗: ' +
+      response.status
+    );
+
+  }
+
+
+  if (!result.ok) {
+
+    throw new Error(
+      'Config取得失敗: ' +
+      text
+    );
+
+  }
+
+
+  const configs =
+    Array.isArray(
+      result.configs
+    )
+      ? result.configs
+      : [];
+
+
+  const validConfigs = [];
+
+
+  for (
+    let i = 0;
+    i < configs.length;
+    i++
+  ) {
+
+    const config =
+      configs[i];
+
+
+    if (
+      !config ||
+      config.market !== MARKET
+    ) {
+
+      console.log(
+        '⚠️ Mercari以外の設定をスキップ:',
+        config && config.conditionId
+          ? config.conditionId
+          : 'UNKNOWN'
+      );
+
+      continue;
+
+    }
+
+
+    if (
+      !config.conditionId ||
+      !config.searchUrl
+    ) {
+
+      throw new Error(
+        '市場監視設定が不正です: ' +
+        JSON.stringify(config)
+      );
+
+    }
+
+
+    validConfigs.push(
+      config
+    );
+
+
+    console.log(
+      '------------------------------'
+    );
+
+    console.log(
+      `[${validConfigs.length}]`,
+      config.conditionId,
+      config.searchName || ''
+    );
+
+    console.log(
+      '監視頻度:',
+      config.intervalMinutes,
+      '分'
+    );
+
+    console.log(
+      '検索URL:',
+      config.searchUrl
+    );
+
+  }
+
+
+  console.log(
+    'Mercari ON条件:',
+    validConfigs.length,
+    '件'
+  );
+
+
+  return validConfigs;
 
 }
 
@@ -237,7 +414,8 @@ async function loadListings(page) {
 // ============================================================
 
 async function extractMercariItems(
-  page
+  page,
+  maxItems
 ) {
 
   const raw =
@@ -553,7 +731,7 @@ async function extractMercariItems(
     )
     .slice(
       0,
-      CONDITION.maxItems
+      maxItems
     );
 
 }
@@ -564,7 +742,8 @@ async function extractMercariItems(
 // ============================================================
 
 async function sendToAppsScript(
-  items
+  items,
+  conditionId
 ) {
 
   const payload = {
@@ -573,10 +752,10 @@ async function sendToAppsScript(
       INGEST_SECRET,
 
     market:
-      CONDITION.market,
+      MARKET,
 
     conditionId:
-      CONDITION.conditionId,
+      conditionId,
 
     items:
       items
@@ -674,6 +853,135 @@ async function sendToAppsScript(
 
 
 // ============================================================
+// 1条件分のMercari検索
+// ============================================================
+
+async function scanMercariCondition(
+  page,
+  config
+) {
+
+  console.log(
+    '=============================='
+  );
+
+  console.log(
+    '条件:',
+    config.conditionId,
+    config.searchName || ''
+  );
+
+  console.log(
+    'Mercari検索ページを開きます'
+  );
+
+
+  await page.goto(
+    config.searchUrl,
+    {
+
+      waitUntil:
+        'domcontentloaded',
+
+      timeout:
+        60000
+
+    }
+  );
+
+
+  await dismissRegionGate(
+    page
+  );
+
+
+  await page.waitForTimeout(
+    2500
+  );
+
+
+  await loadListings(
+    page
+  );
+
+
+  const items =
+    await extractMercariItems(
+      page,
+      MAX_SEARCH_ITEMS
+    );
+
+
+  console.log(
+    '取得商品数:',
+    items.length
+  );
+
+
+  for (
+    const item
+    of items
+  ) {
+
+    console.log(
+      item.itemId,
+      item.price,
+      item.title
+    );
+
+  }
+
+
+  if (
+    items.length === 0
+  ) {
+
+    throw new Error(
+      config.conditionId +
+      ' 商品を1件も取得できませんでした'
+    );
+
+  }
+
+
+  const result =
+    await sendToAppsScript(
+      items,
+      config.conditionId
+    );
+
+
+  console.log(
+    '------------------------------'
+  );
+
+  console.log(
+    '条件ID:',
+    config.conditionId
+  );
+
+  console.log(
+    '受信件数:',
+    result.received
+  );
+
+  console.log(
+    '新規:',
+    result.inserted
+  );
+
+  console.log(
+    '更新:',
+    result.updated
+  );
+
+
+  return result;
+
+}
+
+
+// ============================================================
 // メイン
 // ============================================================
 
@@ -689,17 +997,33 @@ async function main() {
 
   console.log(
     '市場:',
-    CONDITION.market
+    MARKET
   );
 
-  console.log(
-    '条件:',
-    CONDITION.conditionId
-  );
 
-  console.log(
-    '=============================='
-  );
+  // ========================================================
+  // 市場監視設定からMercariのON条件を取得
+  // ========================================================
+
+  const configs =
+    await getMercariConfigs();
+
+
+  if (
+    configs.length === 0
+  ) {
+
+    console.log(
+      '=============================='
+    );
+
+    console.log(
+      'MercariのON監視条件が0件のため終了します'
+    );
+
+    return;
+
+  }
 
 
   const browser =
@@ -756,81 +1080,38 @@ async function main() {
 
   try {
 
-    console.log(
-      'Mercari検索ページを開きます'
-    );
-
-
-    await page.goto(
-      CONDITION.searchUrl,
-      {
-
-        waitUntil:
-          'domcontentloaded',
-
-        timeout:
-          60000
-
-      }
-    );
-
-
-    await dismissRegionGate(
-      page
-    );
-
-
-    await page.waitForTimeout(
-      2500
-    );
-
-
-    await loadListings(
-      page
-    );
-
-
-    const items =
-      await extractMercariItems(
-        page
-      );
-
-
-    console.log(
-      '取得商品数:',
-      items.length
-    );
-
-
     for (
-      const item
-      of items
+      let i = 0;
+      i < configs.length;
+      i++
     ) {
+
+      const config =
+        configs[i];
+
 
       console.log(
-        item.itemId,
-        item.price,
-        item.title
+        '=============================='
+      );
+
+      console.log(
+        `[条件 ${i + 1}/${configs.length}]`,
+        config.conditionId,
+        config.searchName || ''
+      );
+
+
+      await scanMercariCondition(
+        page,
+        config
+      );
+
+
+      await page.waitForTimeout(
+        500
       );
 
     }
-
-
-    if (
-      items.length === 0
-    ) {
-
-      throw new Error(
-        '商品を1件も取得できませんでした'
-      );
-
-    }
-
-
-    const result =
-      await sendToAppsScript(
-        items
-      );
 
 
     console.log(
@@ -838,22 +1119,7 @@ async function main() {
     );
 
     console.log(
-      '受信件数:',
-      result.received
-    );
-
-    console.log(
-      '新規:',
-      result.inserted
-    );
-
-    console.log(
-      '更新:',
-      result.updated
-    );
-
-    console.log(
-      'Market Monitor OS SUCCESS'
+      '✅ Mercari Config Discovery + Monitor SUCCESS'
     );
 
     console.log(
