@@ -1,13 +1,9 @@
 const { chromium } = require('playwright');
 
-const YAHOO_URL =
-  'https://auctions.yahoo.co.jp/search/search?p=グッチ+スーツ&auccat=23176&va=グッチ+スーツ&aucmaxprice=29000&is_postage_mode=1&dest_pref_code=40&b=1&n=50&s1=new&o1=d';
-
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
 const MARKET_INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
 
 const MARKET = 'ヤフオク';
-const CONDITION_ID = 'Y-01';
 
 const MAX_SEARCH_ITEMS = 10;
 const MAX_TRACKED_ITEMS = 30;
@@ -106,6 +102,203 @@ async function sendToAppsScript(items, conditionId) {
 
 
 // ============================================================
+// 市場監視設定取得
+//
+// market-ingest の getConfig を使用し、
+// 「市場監視設定」で ON のYahoo条件だけ取得する。
+//
+// 検索URL / 条件IDはコードへ固定しない。
+// ============================================================
+
+async function getYahooConfigs() {
+
+  if (!MARKET_INGEST_URL) {
+    throw new Error(
+      'MARKET_INGEST_URL が設定されていません'
+    );
+  }
+
+  if (!MARKET_INGEST_SECRET) {
+    throw new Error(
+      'MARKET_INGEST_SECRET が設定されていません'
+    );
+  }
+
+
+  console.log(
+    '=============================='
+  );
+
+  console.log(
+    '市場監視設定を取得'
+  );
+
+
+  const response =
+    await fetch(
+      MARKET_INGEST_URL,
+      {
+        method:
+          'POST',
+
+        headers: {
+          'Content-Type':
+            'application/json'
+        },
+
+        body:
+          JSON.stringify({
+            secret:
+              MARKET_INGEST_SECRET,
+
+            action:
+              'getConfig',
+
+            market:
+              MARKET
+          }),
+
+        redirect:
+          'follow'
+      }
+    );
+
+
+  const text =
+    await response.text();
+
+
+  let result;
+
+
+  try {
+
+    result =
+      JSON.parse(text);
+
+  } catch (error) {
+
+    console.log(
+      'Apps Script Response:',
+      text
+    );
+
+    throw new Error(
+      'Config応答がJSONではありません'
+    );
+
+  }
+
+
+  if (!response.ok) {
+    throw new Error(
+      'Config HTTP失敗: ' +
+      response.status
+    );
+  }
+
+
+  if (!result.ok) {
+    throw new Error(
+      'Config取得失敗: ' +
+      text
+    );
+  }
+
+
+  const configs =
+    Array.isArray(
+      result.configs
+    )
+      ? result.configs
+      : [];
+
+
+  const validConfigs = [];
+
+
+  for (
+    let i = 0;
+    i < configs.length;
+    i++
+  ) {
+
+    const config =
+      configs[i];
+
+
+    if (
+      !config ||
+      config.market !== MARKET
+    ) {
+
+      console.log(
+        '⚠️ Yahoo以外の設定をスキップ:',
+        config && config.conditionId
+          ? config.conditionId
+          : 'UNKNOWN'
+      );
+
+      continue;
+
+    }
+
+
+    if (
+      !config.conditionId ||
+      !config.searchUrl
+    ) {
+
+      throw new Error(
+        '市場監視設定が不正です: ' +
+        JSON.stringify(config)
+      );
+
+    }
+
+
+    validConfigs.push(
+      config
+    );
+
+
+    console.log(
+      '------------------------------'
+    );
+
+    console.log(
+      `[${validConfigs.length}]`,
+      config.conditionId,
+      config.searchName || ''
+    );
+
+    console.log(
+      '監視頻度:',
+      config.intervalMinutes,
+      '分'
+    );
+
+    console.log(
+      '検索URL:',
+      config.searchUrl
+    );
+
+  }
+
+
+  console.log(
+    'Yahoo ON条件:',
+    validConfigs.length,
+    '件'
+  );
+
+
+  return validConfigs;
+
+}
+
+
+// ============================================================
 // Yahoo検索結果
 //
 // 役割:
@@ -115,10 +308,29 @@ async function sendToAppsScript(items, conditionId) {
 // 既存商品の詳細追跡は止めない。
 // ============================================================
 
-async function scanYahooSearch(page) {
+async function scanYahooSearch(
+  page,
+  config
+) {
+
+  const conditionId =
+    config.conditionId;
+
+  const searchName =
+    config.searchName || '';
+
+  const searchUrl =
+    config.searchUrl;
+
 
   console.log(
     '=============================='
+  );
+
+  console.log(
+    '条件:',
+    conditionId,
+    searchName
   );
 
   console.log(
@@ -145,7 +357,7 @@ async function scanYahooSearch(page) {
       if (attempt === 1) {
 
         await page.goto(
-          YAHOO_URL,
+          searchUrl,
           {
             waitUntil: 'domcontentloaded',
             timeout: 60000
@@ -1499,9 +1711,19 @@ async function trackExistingYahooItems(
 
 
     const conditionId =
-      trackedItem.conditionId
-      ||
-      CONDITION_ID;
+      trackedItem.conditionId;
+
+
+    if (!conditionId) {
+
+      console.log(
+        '⚠️ conditionIdなしの追跡商品をスキップ:',
+        trackedItem.itemId
+      );
+
+      continue;
+
+    }
 
 
     if (
@@ -1578,6 +1800,31 @@ async function trackExistingYahooItems(
 
 async function main() {
 
+  // ========================================================
+  // 市場監視設定からYahooのON条件を取得
+  // ========================================================
+
+  const configs =
+    await getYahooConfigs();
+
+
+  if (
+    configs.length === 0
+  ) {
+
+    console.log(
+      '=============================='
+    );
+
+    console.log(
+      'YahooのON監視条件が0件のため終了します'
+    );
+
+    return;
+
+  }
+
+
   const browser =
     await chromium.launch({
       headless: true
@@ -1608,45 +1855,148 @@ async function main() {
 
 
     // ========================================================
-    // ① 新着発見
-    // ========================================================
-
-    const searchItems =
-      await scanYahooSearch(
-        searchPage
-      );
-
-
-    // ========================================================
-    // market-ingestへ接続
+    // ① ON条件を順番に新着検索
     //
-    // 新着0件でもtrackedYahooを取得するため送信。
+    // 各条件ごとにmarket-ingestへ接続し、
+    // 新着0件でもtrackedYahooを取得する。
     // ========================================================
 
-    console.log(
-      '=============================='
-    );
-
-    console.log(
-      '市場監視台帳へ接続'
-    );
+    const trackedYahooMap =
+      new Map();
 
 
-    const ingestResult =
-      await sendToAppsScript(
-        searchItems,
-        CONDITION_ID
+    for (
+      let i = 0;
+      i < configs.length;
+      i++
+    ) {
+
+      const config =
+        configs[i];
+
+
+      console.log(
+        '=============================='
+      );
+
+      console.log(
+        `[条件 ${i + 1}/${configs.length}]`,
+        config.conditionId,
+        config.searchName || ''
       );
 
 
-    console.log(
-      '新着受信:',
-      ingestResult.received,
-      '新規:',
-      ingestResult.inserted,
-      '更新:',
-      ingestResult.updated
-    );
+      const searchItems =
+        await scanYahooSearch(
+          searchPage,
+          config
+        );
+
+
+      // ======================================================
+      // market-ingestへ接続
+      // ======================================================
+
+      console.log(
+        '=============================='
+      );
+
+      console.log(
+        '市場監視台帳へ接続:',
+        config.conditionId
+      );
+
+
+      const ingestResult =
+        await sendToAppsScript(
+          searchItems,
+          config.conditionId
+        );
+
+
+      console.log(
+        '新着受信:',
+        ingestResult.received,
+        '新規:',
+        ingestResult.inserted,
+        '更新:',
+        ingestResult.updated
+      );
+
+
+      const trackedYahoo =
+        Array.isArray(
+          ingestResult.trackedYahoo
+        )
+          ? ingestResult.trackedYahoo
+          : [];
+
+
+      // trackedYahoo側にconditionIdが無い場合でも、
+      // 今回問い合わせた条件IDを安全なフォールバックとして付与する。
+      for (
+        let j = 0;
+        j < trackedYahoo.length;
+        j++
+      ) {
+
+        const trackedItem =
+          trackedYahoo[j];
+
+
+        if (!trackedItem) {
+          continue;
+        }
+
+
+        const normalizedConditionId =
+          trackedItem.conditionId
+          ||
+          config.conditionId;
+
+
+        const normalizedItem = {
+          ...trackedItem,
+          conditionId:
+            normalizedConditionId
+        };
+
+
+        const itemKey =
+          normalizedItem.itemId
+          ||
+          normalizedItem.url;
+
+
+        if (!itemKey) {
+
+          console.log(
+            '⚠️ itemId / URLなしの追跡商品をスキップ:',
+            normalizedConditionId
+          );
+
+          continue;
+
+        }
+
+
+        const key =
+          `${normalizedConditionId}::${itemKey}`;
+
+
+        trackedYahooMap.set(
+          key,
+          normalizedItem
+        );
+
+      }
+
+
+      await sleep(
+        500
+      );
+
+    }
 
 
     await searchPage.close();
@@ -1654,14 +2004,31 @@ async function main() {
 
     // ========================================================
     // ② 既存商品の詳細価格追跡
+    //
+    // 複数条件から返ったtrackedYahooを重複排除したうえで、
+    // 既存の安全な詳細価格取得ロジックへ渡す。
     // ========================================================
 
+    const trackedYahoo =
+      Array.from(
+        trackedYahooMap.values()
+      );
+
+
+    console.log(
+      '=============================='
+    );
+
+    console.log(
+      '統合追跡対象:',
+      trackedYahoo.length,
+      '件'
+    );
+
+
     await trackExistingYahooItems(
-
       context,
-
-      ingestResult.trackedYahoo
-
+      trackedYahoo
     );
 
 
@@ -1671,7 +2038,7 @@ async function main() {
 
 
     console.log(
-      '✅ Yahoo Discovery + Safe Price Tracking SUCCESS'
+      '✅ Yahoo Config Discovery + Safe Price Tracking SUCCESS'
     );
 
 
