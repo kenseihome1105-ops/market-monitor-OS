@@ -167,11 +167,11 @@ async function main() {
 
 
   if (
-    configs.length !== 1
+    configs.length !== 2
   ) {
 
     throw new Error(
-      '現在のMercari ON条件は1件想定ですが、' +
+      '現在のMercari ON条件は2件想定ですが、' +
       configs.length +
       '件返りました'
     );
@@ -179,52 +179,113 @@ async function main() {
   }
 
 
-  const config =
-    configs[0];
+  const configMap =
+    new Map(
+      configs.map(
+        config => [
+          config.conditionId,
+          config
+        ]
+      )
+    );
 
 
-  if (
-    config.conditionId !== 'M-01'
-  ) {
+  const m01 =
+    configMap.get(
+      'M-01'
+    );
+
+
+  const m02 =
+    configMap.get(
+      'M-02'
+    );
+
+
+  if (!m01) {
 
     throw new Error(
-      'M-01ではありません: ' +
-      config.conditionId
+      'M-01が取得できていません'
     );
 
   }
 
 
-  if (
-    config.market !== 'メルカリ'
-  ) {
+  if (!m02) {
 
     throw new Error(
-      '市場がメルカリではありません'
+      'M-02が取得できていません'
     );
 
   }
 
 
-  if (
-    config.searchName !== 'GUCCI スーツ'
+  const expectedConfigs = [
+    {
+      conditionId:
+        'M-01',
+
+      searchName:
+        'GUCCI スーツ'
+    },
+
+    {
+      conditionId:
+        'M-02',
+
+      searchName:
+        'PRADA スーツ'
+    }
+  ];
+
+
+  for (
+    const expected
+    of expectedConfigs
   ) {
 
-    throw new Error(
-      '条件名が想定と違います: ' +
-      config.searchName
-    );
-
-  }
+    const config =
+      configMap.get(
+        expected.conditionId
+      );
 
 
-  if (
-    !config.searchUrl
-  ) {
+    if (
+      config.market !== 'メルカリ'
+    ) {
 
-    throw new Error(
-      '検索URLが空です'
-    );
+      throw new Error(
+        expected.conditionId +
+        'の市場がメルカリではありません'
+      );
+
+    }
+
+
+    if (
+      config.searchName !==
+      expected.searchName
+    ) {
+
+      throw new Error(
+        expected.conditionId +
+        'の条件名が想定と違います: ' +
+        config.searchName
+      );
+
+    }
+
+
+    if (
+      !config.searchUrl
+    ) {
+
+      throw new Error(
+        expected.conditionId +
+        'の検索URLが空です'
+      );
+
+    }
 
   }
 
@@ -238,7 +299,7 @@ async function main() {
   );
 
   console.log(
-    '✅ M-01取得確認'
+    '✅ M-01 / M-02 の2条件取得確認'
   );
 
   console.log(
