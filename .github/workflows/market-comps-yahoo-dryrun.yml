@@ -3,8 +3,9 @@ name: Yahoo Market Comps Dry Run
 on:
   workflow_dispatch:
     inputs:
+
       query:
-        description: "比較検索語"
+        description: "Yahoo比較検索語"
         required: true
         default: "GUCCI スーツ"
         type: string
@@ -16,9 +17,67 @@ on:
         type: string
 
       max_items:
-        description: "最大取得件数"
+        description: "最大比較取得件数"
         required: true
         default: "30"
+        type: string
+
+
+      # ======================================================
+      # 判定対象商品
+      # ======================================================
+
+      target_market:
+        description: "対象商品の仕入市場"
+        required: true
+        default: "メルカリ"
+        type: choice
+        options:
+          - メルカリ
+          - ヤフオク
+
+      target_condition_id:
+        description: "対象商品の監視条件ID（例 M-01 / Y-03）"
+        required: false
+        default: ""
+        type: string
+
+      target_item_id:
+        description: "対象商品の出品ID"
+        required: true
+        type: string
+
+      target_url:
+        description: "対象商品のURL"
+        required: true
+        type: string
+
+      target_title:
+        description: "対象商品名"
+        required: true
+        type: string
+
+      target_current_price:
+        description: "対象商品の現在価格（数字のみ）"
+        required: true
+        type: string
+
+      target_db_id:
+        description: "商品マスターDB商品ID（未紐付けなら空欄）"
+        required: false
+        default: ""
+        type: string
+
+      target_brand:
+        description: "ブランド（例 GUCCI）"
+        required: false
+        default: ""
+        type: string
+
+      target_category:
+        description: "カテゴリー（例 スーツ）"
+        required: false
+        default: ""
         type: string
 
 
@@ -28,30 +87,124 @@ permissions:
 
 jobs:
   yahoo-market-comps-dryrun:
+
     runs-on: ubuntu-latest
 
     timeout-minutes: 10
 
+
     env:
+
+      # ======================================================
+      # Yahoo比較検索
+      # ======================================================
+
       COMP_QUERY: ${{ inputs.query }}
+
       COMP_CATEGORY_ID: ${{ inputs.category_id }}
+
       COMP_MAX_ITEMS: ${{ inputs.max_items }}
+
       COMP_TIMEOUT_MS: "60000"
 
+
+      # ======================================================
+      # 判定対象商品
+      # ======================================================
+
+      COMP_TARGET_MARKET: ${{ inputs.target_market }}
+
+      COMP_TARGET_CONDITION_ID: ${{ inputs.target_condition_id }}
+
+      COMP_TARGET_ITEM_ID: ${{ inputs.target_item_id }}
+
+      COMP_TARGET_URL: ${{ inputs.target_url }}
+
+      COMP_TARGET_TITLE: ${{ inputs.target_title }}
+
+      COMP_TARGET_CURRENT_PRICE: ${{ inputs.target_current_price }}
+
+      COMP_TARGET_DB_ID: ${{ inputs.target_db_id }}
+
+      COMP_TARGET_BRAND: ${{ inputs.target_brand }}
+
+      COMP_TARGET_CATEGORY: ${{ inputs.target_category }}
+
+
+      # ======================================================
+      # 既存market-ingest接続
+      #
+      # GitHub Secretsの既存値をそのまま使用。
+      # Secretの再発行・変更はしない。
+      # ======================================================
+
+      MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+
+      MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+
+
     steps:
+
       - name: Checkout
         uses: actions/checkout@v4
+
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
+
       - name: Install packages
         run: npm install
+
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run Yahoo Market Comps Dry Run
+
+      - name: Validate target inputs
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "$COMP_TARGET_MARKET" ]; then
+            echo "❌ target_market が未設定"
+            exit 1
+          fi
+
+          if [ -z "$COMP_TARGET_ITEM_ID" ]; then
+            echo "❌ target_item_id が未設定"
+            exit 1
+          fi
+
+          if [ -z "$COMP_TARGET_URL" ]; then
+            echo "❌ target_url が未設定"
+            exit 1
+          fi
+
+          if [ -z "$COMP_TARGET_TITLE" ]; then
+            echo "❌ target_title が未設定"
+            exit 1
+          fi
+
+          if [ -z "$COMP_TARGET_CURRENT_PRICE" ]; then
+            echo "❌ target_current_price が未設定"
+            exit 1
+          fi
+
+          if [ -z "$MARKET_INGEST_URL" ]; then
+            echo "❌ MARKET_INGEST_URL Secret が未設定"
+            exit 1
+          fi
+
+          if [ -z "$MARKET_INGEST_SECRET" ]; then
+            echo "❌ MARKET_INGEST_SECRET Secret が未設定"
+            exit 1
+          fi
+
+          echo "✅ 入力値・market-ingest接続情報 OK"
+
+
+      - name: Run Yahoo Market Comps
         run: node market-comps-yahoo-dryrun.js
