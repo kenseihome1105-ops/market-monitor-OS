@@ -1,0 +1,57 @@
+name: Yahoo Market Comps Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "比較検索語"
+        required: true
+        default: "GUCCI スーツ"
+        type: string
+
+      category_id:
+        description: "YahooカテゴリID"
+        required: true
+        default: "23176"
+        type: string
+
+      max_items:
+        description: "最大取得件数"
+        required: true
+        default: "30"
+        type: string
+
+
+permissions:
+  contents: read
+
+
+jobs:
+  yahoo-market-comps-dryrun:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 10
+
+    env:
+      COMP_QUERY: ${{ inputs.query }}
+      COMP_CATEGORY_ID: ${{ inputs.category_id }}
+      COMP_MAX_ITEMS: ${{ inputs.max_items }}
+      COMP_TIMEOUT_MS: "60000"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install packages
+        run: npm install
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Yahoo Market Comps Dry Run
+        run: node market-comps-yahoo-dryrun.js
