@@ -1,0 +1,92 @@
+name: Yahoo Market Comps Smoke Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      comp_query:
+        description: Yahoo検索語
+        required: true
+        default: 'BURBERRY スーツ'
+      target_condition_id:
+        description: 元の監視条件ID
+        required: true
+        default: 'M-03'
+      target_item_id:
+        description: Mercari出品ID
+        required: true
+        default: 'm54619762780'
+      target_url:
+        description: Mercari商品URL
+        required: true
+        default: 'https://jp.mercari.com/item/m54619762780'
+      target_title:
+        description: 対象商品名
+        required: true
+        default: '美品 バーバリーズ Burberrys スーツ 紺 L'
+      target_current_price:
+        description: 対象商品の現在価格
+        required: true
+        default: '15400'
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install packages
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Yahoo Market Comps smoke test
+        env:
+          MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+          MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+          COMP_QUERY: ${{ inputs.comp_query }}
+          COMP_CATEGORY_ID: '23176'
+          COMP_MAX_ITEMS: '30'
+          COMP_TIMEOUT_MS: '60000'
+          COMP_TARGET_MARKET: 'メルカリ'
+          COMP_TARGET_CONDITION_ID: ${{ inputs.target_condition_id }}
+          COMP_TARGET_ITEM_ID: ${{ inputs.target_item_id }}
+          COMP_TARGET_URL: ${{ inputs.target_url }}
+          COMP_TARGET_TITLE: ${{ inputs.target_title }}
+          COMP_TARGET_CURRENT_PRICE: ${{ inputs.target_current_price }}
+        shell: bash
+        run: |
+          set -u
+
+          for attempt in 1 2 3; do
+            echo "========================================"
+            echo "Yahoo Market Comps smoke test attempt ${attempt}/3"
+            echo "========================================"
+
+            if node market-comps-yahoo-dryrun.js; then
+              echo "✅ Yahoo Market Comps smoke test SUCCESS"
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              if [ "$attempt" -eq 1 ]; then
+                wait_seconds=3
+              else
+                wait_seconds=7
+              fi
+
+              echo "⚠️ 一時失敗の可能性があるため ${wait_seconds} 秒後に再試行します"
+              sleep "$wait_seconds"
+            fi
+          done
+
+          echo "❌ Yahoo Market Comps smoke test FAILED after 3 attempts"
+          exit 1
