@@ -11,6 +11,35 @@ const MARKET =
 const MAX_SEARCH_ITEMS =
   10;
 
+// ============================================================
+// Yahoo Market Comps 設定
+//
+// 新規Mercari商品だけを対象に、
+// Yahooオークション「終了180日間」から
+// 類似成約商品を最大30件取得する。
+// ============================================================
+
+const MARKET_COMPS_SOURCE_VERSION =
+  'yahoo-comps-v2';
+
+const MARKET_COMPS_MAX_ITEMS =
+  marketCompsPositiveInt_(
+    process.env.COMP_MAX_ITEMS,
+    30
+  );
+
+const MARKET_COMPS_TIMEOUT_MS =
+  marketCompsPositiveInt_(
+    process.env.COMP_TIMEOUT_MS,
+    60000
+  );
+
+const MARKET_COMPS_DEFAULT_CATEGORY_ID =
+  String(
+    process.env.COMP_CATEGORY_ID ||
+    '23176'
+  ).trim();
+
 
 // ============================================================
 // 必須Secret
@@ -895,6 +924,1522 @@ async function sendToAppsScript(
 
 
 // ============================================================
+// Yahoo Market Comps
+//
+// market-comps-yahoo-dryrun.js で確認済みの
+// 「Yahoo終了180日間」取得方式を monitor.js に統合。
+//
+// 重要:
+// ・新規Mercari商品(insertedItems)だけを対象にする
+// ・既存Mercari監視の成否はYahoo相場取得失敗で壊さない
+// ・市場監視台帳へ直接書かない
+// ・相場比較データへの書込は market-ingest 経由のみ
+// ============================================================
+
+function marketCompsPositiveInt_(
+  value,
+  fallback
+) {
+
+  const number =
+    Number(
+      value
+    );
+
+
+  if (
+    !Number.isInteger(
+      number
+    )
+    ||
+    number <= 0
+  ) {
+
+    return fallback;
+
+  }
+
+
+  return number;
+
+}
+
+
+function normalizeMarketCompsSpace_(
+  value
+) {
+
+  return String(
+    value || ''
+  )
+    .replace(
+      /\u00a0/g,
+      ' '
+    )
+    .replace(
+      /\s+/g,
+      ' '
+    )
+    .trim();
+
+}
+
+
+function parseMarketCompsYen_(
+  value
+) {
+
+  const number =
+    Number(
+      String(
+        value == null
+          ? ''
+          : value
+      )
+        .replace(
+          /,/g,
+          ''
+        )
+        .replace(
+          /[¥￥円\s]/g,
+          ''
+        )
+    );
+
+
+  return Number.isFinite(
+    number
+  )
+    ? number
+    : null;
+
+}
+
+
+function escapeMarketCompsRegExp_(
+  value
+) {
+
+  return String(
+    value || ''
+  ).replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&'
+  );
+
+}
+
+
+function firstMarketCompsYenAfter_(
+  text,
+  label
+) {
+
+  const escaped =
+    escapeMarketCompsRegExp_(
+      label
+    );
+
+
+  const match =
+    String(
+      text || ''
+    ).match(
+      new RegExp(
+        escaped +
+        '\\s*([\\d,]+)\\s*円'
+      )
+    );
+
+
+  return match
+    ? parseMarketCompsYen_(
+        match[1]
+      )
+    : null;
+
+}
+
+
+function extractMarketCompsResultCount_(
+  text
+) {
+
+  const matches =
+    [
+      ...String(
+        text || ''
+      ).matchAll(
+        /([\d,]+)\s*件/g
+      )
+    ];
+
+
+  if (
+    !matches.length
+  ) {
+
+    return null;
+
+  }
+
+
+  const numbers =
+    matches
+      .map(
+        match =>
+          Number(
+            String(
+              match[1]
+            ).replace(
+              /,/g,
+              ''
+            )
+          )
+      )
+      .filter(
+        Number.isFinite
+      );
+
+
+  return numbers.length
+    ? Math.max(
+        ...numbers
+      )
+    : null;
+
+}
+
+
+function buildYahooClosedSearchUrl_(
+  query,
+  categoryId
+) {
+
+  if (
+    !query
+  ) {
+
+    throw new Error(
+      'Yahoo Market Comps: 検索語が空です'
+    );
+
+  }
+
+
+  if (
+    !categoryId
+  ) {
+
+    throw new Error(
+      'Yahoo Market Comps: categoryIdが空です'
+    );
+
+  }
+
+
+  return (
+    'https://auctions.yahoo.co.jp/' +
+    'closedsearch/closedsearch/' +
+    encodeURIComponent(
+      query
+    ) +
+    '/' +
+    encodeURIComponent(
+      categoryId
+    ) +
+    '?n=50'
+  );
+
+}
+
+
+async function extractYahooMarketCompsSummary_(
+  page
+) {
+
+  const body =
+    await page
+      .locator(
+        'body'
+      )
+      .innerText();
+
+
+  const text =
+    String(
+      body || ''
+    );
+
+
+  return {
+
+    minPrice:
+      firstMarketCompsYenAfter_(
+        text,
+        '最安'
+      ),
+
+    averagePrice:
+      firstMarketCompsYenAfter_(
+        text,
+        '平均'
+      ),
+
+    maxPrice:
+      firstMarketCompsYenAfter_(
+        text,
+        '最高'
+      ),
+
+    resultCount:
+      extractMarketCompsResultCount_(
+        text
+      )
+
+  };
+
+}
+
+
+async function extractYahooClosedItems_(
+  page,
+  limit
+) {
+
+  return await page.evaluate(
+    ({ limit }) => {
+
+      function clean(
+        value
+      ) {
+
+        return String(
+          value || ''
+        )
+          .replace(
+            /\u00a0/g,
+            ' '
+          )
+          .replace(
+            /[ \t]+/g,
+            ' '
+          )
+          .replace(
+            /\n{3,}/g,
+            '\n\n'
+          )
+          .trim();
+
+      }
+
+
+      function absoluteUrl(
+        href
+      ) {
+
+        try {
+
+          return new URL(
+            href,
+            location.href
+          ).href;
+
+        } catch (error) {
+
+          return '';
+
+        }
+
+      }
+
+
+      function findCard(
+        anchor
+      ) {
+
+        let node =
+          anchor;
+
+
+        for (
+          let depth = 0;
+          depth < 10;
+          depth++
+        ) {
+
+          node =
+            node.parentElement;
+
+
+          if (
+            !node
+          ) {
+
+            break;
+
+          }
+
+
+          const text =
+            clean(
+              node.innerText
+            );
+
+
+          if (
+            text.includes(
+              '落札'
+            )
+            &&
+            text.includes(
+              '終了'
+            )
+            &&
+            text.length <= 5000
+          ) {
+
+            return node;
+
+          }
+
+        }
+
+
+        return null;
+
+      }
+
+
+      function bestTitle(
+        card,
+        itemHref
+      ) {
+
+        const links =
+          Array.from(
+            card.querySelectorAll(
+              'a'
+            )
+          );
+
+
+        const candidates =
+          links
+            .filter(
+              link => {
+
+                const href =
+                  absoluteUrl(
+                    link.getAttribute(
+                      'href'
+                    )
+                  );
+
+
+                return (
+                  href
+                  &&
+                  href.split('#')[0] ===
+                  itemHref.split('#')[0]
+                );
+
+              }
+            )
+            .map(
+              link =>
+                clean(
+                  link.innerText
+                  ||
+                  link.getAttribute(
+                    'aria-label'
+                  )
+                  ||
+                  link.getAttribute(
+                    'title'
+                  )
+                )
+            )
+            .filter(
+              text =>
+                text &&
+                text.length >= 4
+            )
+            .sort(
+              (
+                a,
+                b
+              ) =>
+                b.length -
+                a.length
+            );
+
+
+        if (
+          candidates.length
+        ) {
+
+          return candidates[0];
+
+        }
+
+
+        const heading =
+          card.querySelector(
+            'h1,h2,h3,h4'
+          );
+
+
+        return heading
+          ? clean(
+              heading.innerText
+            )
+          : '';
+
+      }
+
+
+      const anchors =
+        Array.from(
+          document.querySelectorAll(
+            'a[href*="/jp/auction/"]'
+          )
+        );
+
+
+      const seen =
+        new Set();
+
+
+      const results =
+        [];
+
+
+      for (
+        const anchor
+        of anchors
+      ) {
+
+        if (
+          results.length >=
+          limit
+        ) {
+
+          break;
+
+        }
+
+
+        const href =
+          absoluteUrl(
+            anchor.getAttribute(
+              'href'
+            )
+          );
+
+
+        if (
+          !href
+        ) {
+
+          continue;
+
+        }
+
+
+        const idMatch =
+          href.match(
+            /\/jp\/auction\/([^/?#]+)/
+          );
+
+
+        if (
+          !idMatch
+        ) {
+
+          continue;
+
+        }
+
+
+        const itemId =
+          idMatch[1];
+
+
+        if (
+          seen.has(
+            itemId
+          )
+        ) {
+
+          continue;
+
+        }
+
+
+        const card =
+          findCard(
+            anchor
+          );
+
+
+        if (
+          !card
+        ) {
+
+          continue;
+
+        }
+
+
+        const text =
+          clean(
+            card.innerText
+          );
+
+
+        const priceMatch =
+          text.match(
+            /落札\s*([\d,]+)\s*円/
+          );
+
+
+        const endMatch =
+          text.match(
+            /(\d{1,2}\/\d{1,2})\s+(\d{1,2}:\d{2})\s*終了/
+          );
+
+
+        if (
+          !priceMatch ||
+          !endMatch
+        ) {
+
+          continue;
+
+        }
+
+
+        const title =
+          bestTitle(
+            card,
+            href
+          );
+
+
+        if (
+          !title
+        ) {
+
+          continue;
+
+        }
+
+
+        const stateCandidates = [
+
+          '新品、未使用',
+
+          '未使用に近い',
+
+          '目立った傷や汚れなし',
+
+          'やや傷や汚れあり',
+
+          '傷や汚れあり',
+
+          '全体的に状態が悪い',
+
+          '未使用'
+
+        ];
+
+
+        let condition =
+          '';
+
+
+        for (
+          const state
+          of stateCandidates
+        ) {
+
+          if (
+            text.includes(
+              state
+            )
+          ) {
+
+            condition =
+              state;
+
+
+            break;
+
+          }
+
+        }
+
+
+        const bidMatch =
+          text.match(
+            /(?:入札|入札件数)\s*[:：]?\s*(\d+)/
+          );
+
+
+        seen.add(
+          itemId
+        );
+
+
+        results.push({
+
+          itemId,
+
+          url:
+            href.split('#')[0],
+
+          title,
+
+          soldPriceText:
+            priceMatch[1],
+
+          endDateLabel:
+            endMatch[1],
+
+          endTimeLabel:
+            endMatch[2],
+
+          condition,
+
+          bidCount:
+            bidMatch
+              ? Number(
+                  bidMatch[1]
+                )
+              : null
+
+        });
+
+      }
+
+
+      return results;
+
+    },
+
+    {
+      limit
+    }
+  );
+
+}
+
+
+function parseYahooMarketCompsEndDate_(
+  md,
+  hm
+) {
+
+  const mdMatch =
+    String(
+      md || ''
+    ).match(
+      /^(\d{1,2})\/(\d{1,2})$/
+    );
+
+
+  const hmMatch =
+    String(
+      hm || ''
+    ).match(
+      /^(\d{1,2}):(\d{2})$/
+    );
+
+
+  if (
+    !mdMatch ||
+    !hmMatch
+  ) {
+
+    return null;
+
+  }
+
+
+  const month =
+    Number(
+      mdMatch[1]
+    );
+
+
+  const day =
+    Number(
+      mdMatch[2]
+    );
+
+
+  const hour =
+    Number(
+      hmMatch[1]
+    );
+
+
+  const minute =
+    Number(
+      hmMatch[2]
+    );
+
+
+  const now =
+    new Date();
+
+
+  const currentYear =
+    Number(
+      new Intl.DateTimeFormat(
+        'en-US',
+        {
+          timeZone:
+            'Asia/Tokyo',
+
+          year:
+            'numeric'
+        }
+      ).format(
+        now
+      )
+    );
+
+
+  let year =
+    currentYear;
+
+
+  let timestamp =
+    Date.UTC(
+      year,
+      month - 1,
+      day,
+      hour - 9,
+      minute,
+      0
+    );
+
+
+  if (
+    timestamp >
+    now.getTime() +
+    24 * 60 * 60 * 1000
+  ) {
+
+    year -= 1;
+
+
+    timestamp =
+      Date.UTC(
+        year,
+        month - 1,
+        day,
+        hour - 9,
+        minute,
+        0
+      );
+
+  }
+
+
+  const date =
+    new Date(
+      timestamp
+    );
+
+
+  if (
+    isNaN(
+      date.getTime()
+    )
+  ) {
+
+    return null;
+
+  }
+
+
+  return date.toISOString();
+
+}
+
+
+function normalizeYahooClosedItems_(
+  rawItems,
+  query,
+  categoryId
+) {
+
+  return rawItems
+    .map(
+      item => {
+
+        const soldPrice =
+          parseMarketCompsYen_(
+            item.soldPriceText
+          );
+
+
+        const endedAt =
+          parseYahooMarketCompsEndDate_(
+            item.endDateLabel,
+            item.endTimeLabel
+          );
+
+
+        return {
+
+          comparisonMarket:
+            'ヤフオク',
+
+          comparisonType:
+            '成約',
+
+          comparisonItemId:
+            item.itemId,
+
+          comparisonUrl:
+            item.url,
+
+          comparisonTitle:
+            item.title,
+
+          comparisonPrice:
+            soldPrice,
+
+          shipping:
+            null,
+
+          comparisonTotal:
+            soldPrice,
+
+          currency:
+            'JPY',
+
+          jpyTotal:
+            soldPrice,
+
+          endedAt,
+
+          condition:
+            item.condition ||
+            '未取得',
+
+          bidCount:
+            item.bidCount,
+
+          source:
+            'Yahoo closedsearch',
+
+          version:
+            MARKET_COMPS_SOURCE_VERSION,
+
+          query,
+
+          categoryId
+
+        };
+
+      }
+    )
+    .filter(
+      item =>
+        item.comparisonItemId
+        &&
+        item.comparisonUrl
+        &&
+        item.comparisonTitle
+        &&
+        item.comparisonPrice
+    );
+
+}
+
+
+function buildMarketCompsTarget_(
+  insertedItem,
+  config
+) {
+
+  const itemId =
+    String(
+      insertedItem &&
+      insertedItem.itemId ||
+      ''
+    ).trim();
+
+
+  const market =
+    String(
+      insertedItem &&
+      insertedItem.market ||
+      MARKET
+    ).trim();
+
+
+  const targetKey =
+    String(
+      insertedItem &&
+      insertedItem.targetKey ||
+      ''
+    ).trim()
+    ||
+    [
+      market,
+      itemId
+    ].join(
+      '::'
+    );
+
+
+  return {
+
+    targetKey,
+
+    market,
+
+    conditionId:
+      String(
+        insertedItem &&
+        insertedItem.conditionId ||
+        config.conditionId ||
+        ''
+      ).trim(),
+
+    itemId,
+
+    url:
+      String(
+        insertedItem &&
+        insertedItem.url ||
+        ''
+      ).trim(),
+
+    title:
+      String(
+        insertedItem &&
+        insertedItem.title ||
+        ''
+      ).trim(),
+
+    dbItemId:
+      String(
+        insertedItem &&
+        insertedItem.dbItemId ||
+        ''
+      ).trim(),
+
+    brand:
+      String(
+        insertedItem &&
+        insertedItem.brand ||
+        ''
+      ).trim(),
+
+    category:
+      String(
+        insertedItem &&
+        insertedItem.category ||
+        ''
+      ).trim(),
+
+    currentPrice:
+      Number(
+        insertedItem &&
+        insertedItem.currentPrice ||
+        insertedItem &&
+        insertedItem.price ||
+        0
+      )
+
+  };
+
+}
+
+
+function buildMarketCompsQuery_(
+  insertedItem,
+  config
+) {
+
+  const fromConfig =
+    String(
+      config &&
+      config.searchName ||
+      ''
+    ).trim();
+
+
+  if (
+    fromConfig
+  ) {
+
+    return fromConfig;
+
+  }
+
+
+  return String(
+    insertedItem &&
+    insertedItem.title ||
+    ''
+  )
+    .replace(
+      /のサムネイル$/,
+      ''
+    )
+    .trim();
+
+}
+
+
+async function runYahooMarketCompsForTarget_(
+  page,
+  insertedItem,
+  config
+) {
+
+  const target =
+    buildMarketCompsTarget_(
+      insertedItem,
+      config
+    );
+
+
+  const query =
+    buildMarketCompsQuery_(
+      insertedItem,
+      config
+    );
+
+
+  const categoryId =
+    MARKET_COMPS_DEFAULT_CATEGORY_ID;
+
+
+  if (
+    !target.itemId ||
+    !target.url ||
+    !target.title ||
+    !target.currentPrice
+  ) {
+
+    throw new Error(
+      'Yahoo Market Comps: 対象商品の必須情報が不足しています: ' +
+      JSON.stringify(
+        target
+      )
+    );
+
+  }
+
+
+  if (
+    !query
+  ) {
+
+    throw new Error(
+      'Yahoo Market Comps: 検索語を生成できませんでした'
+    );
+
+  }
+
+
+  const searchUrl =
+    buildYahooClosedSearchUrl_(
+      query,
+      categoryId
+    );
+
+
+  console.log(
+    '========================================'
+  );
+
+
+  console.log(
+    'Yahoo Market Comps START'
+  );
+
+
+  console.log(
+    '対象キー:',
+    target.targetKey
+  );
+
+
+  console.log(
+    '対象商品:',
+    target.title
+  );
+
+
+  console.log(
+    '検索語:',
+    query
+  );
+
+
+  console.log(
+    'YahooカテゴリID:',
+    categoryId
+  );
+
+
+  console.log(
+    '検索URL:',
+    searchUrl
+  );
+
+
+  const response =
+    await page.goto(
+      searchUrl,
+      {
+
+        waitUntil:
+          'domcontentloaded',
+
+        timeout:
+          MARKET_COMPS_TIMEOUT_MS
+
+      }
+    );
+
+
+  if (
+    !response
+  ) {
+
+    throw new Error(
+      'Yahoo Market Comps: HTTPレスポンスを取得できませんでした'
+    );
+
+  }
+
+
+  console.log(
+    'Yahoo Market Comps HTTP:',
+    response.status()
+  );
+
+
+  if (
+    response.status() < 200 ||
+    response.status() >= 400
+  ) {
+
+    throw new Error(
+      `Yahoo Market Comps HTTP Error: ${response.status()}`
+    );
+
+  }
+
+
+  await page.waitForSelector(
+    'body',
+    {
+      timeout:
+        MARKET_COMPS_TIMEOUT_MS
+    }
+  );
+
+
+  await page.waitForTimeout(
+    2500
+  );
+
+
+  const pageText =
+    normalizeMarketCompsSpace_(
+      await page
+        .locator(
+          'body'
+        )
+        .innerText()
+    );
+
+
+  if (
+    !pageText.includes(
+      '落札'
+    )
+    ||
+    (
+      !pageText.includes(
+        '終了180日間'
+      )
+      &&
+      !pageText.includes(
+        '180日間の落札相場'
+      )
+    )
+  ) {
+
+    throw new Error(
+      'Yahoo落札相場ページとして確認できませんでした。安全停止します。'
+    );
+
+  }
+
+
+  const summary =
+    await extractYahooMarketCompsSummary_(
+      page
+    );
+
+
+  console.log(
+    'Yahooページ集計:',
+    JSON.stringify(
+      summary
+    )
+  );
+
+
+  const rawItems =
+    await extractYahooClosedItems_(
+      page,
+      MARKET_COMPS_MAX_ITEMS
+    );
+
+
+  if (
+    rawItems.length === 0
+  ) {
+
+    throw new Error(
+      '落札済み商品の取得件数が0件でした。DOM変更の可能性があるため安全停止します。'
+    );
+
+  }
+
+
+  const comparisons =
+    normalizeYahooClosedItems_(
+      rawItems,
+      query,
+      categoryId
+    );
+
+
+  if (
+    comparisons.length === 0
+  ) {
+
+    throw new Error(
+      '正規化後の比較商品が0件です。安全停止します。'
+    );
+
+  }
+
+
+  console.log(
+    'Yahoo比較商品:',
+    comparisons.length,
+    '件'
+  );
+
+
+  const ingestResult =
+    await postAppsScriptJson(
+      {
+
+        secret:
+          INGEST_SECRET,
+
+        action:
+          'upsertMarketComps',
+
+        source:
+          'Yahoo closedsearch',
+
+        sourceVersion:
+          MARKET_COMPS_SOURCE_VERSION,
+
+        query,
+
+        categoryId,
+
+        target,
+
+        comparisons
+
+      },
+
+      `MarketComps ${target.itemId}`
+    );
+
+
+  if (
+    ingestResult.action !==
+    'upsertMarketComps'
+  ) {
+
+    throw new Error(
+      'market-ingest response action が不正です'
+    );
+
+  }
+
+
+  console.log(
+    '✅ Yahoo Market Comps SUCCESS',
+    target.itemId,
+    'received=',
+    ingestResult.received,
+    'inserted=',
+    ingestResult.inserted,
+    'updated=',
+    ingestResult.updated,
+    'skipped=',
+    ingestResult.skipped
+  );
+
+
+  return ingestResult;
+
+}
+
+
+async function runYahooMarketCompsForInsertedItems_(
+  page,
+  insertedItems,
+  config
+) {
+
+  if (
+    !Array.isArray(
+      insertedItems
+    )
+    ||
+    insertedItems.length === 0
+  ) {
+
+    console.log(
+      'Yahoo Market Comps: 新規0件のためスキップ'
+    );
+
+
+    return {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0
+    };
+
+  }
+
+
+  console.log(
+    '========================================'
+  );
+
+
+  console.log(
+    'Yahoo Market Comps対象:',
+    insertedItems.length,
+    '件'
+  );
+
+
+  let succeeded =
+    0;
+
+
+  let failed =
+    0;
+
+
+  for (
+    let i = 0;
+    i < insertedItems.length;
+    i++
+  ) {
+
+    const insertedItem =
+      insertedItems[i];
+
+
+    try {
+
+      console.log(
+        `[Market Comps ${i + 1}/${insertedItems.length}]`,
+        insertedItem &&
+        insertedItem.itemId
+          ? insertedItem.itemId
+          : 'UNKNOWN'
+      );
+
+
+      await runYahooMarketCompsForTarget_(
+        page,
+        insertedItem,
+        config
+      );
+
+
+      succeeded++;
+
+    } catch (error) {
+
+      failed++;
+
+
+      console.error(
+        '⚠️ Yahoo Market Comps失敗:',
+        insertedItem &&
+        insertedItem.itemId
+          ? insertedItem.itemId
+          : 'UNKNOWN'
+      );
+
+
+      console.error(
+        error &&
+        error.stack
+          ? error.stack
+          : error
+      );
+
+
+      // 既存Mercari監視を壊さないため、
+      // 比較取得失敗はこの商品だけで止める。
+      // 次の商品・次条件のMercari監視は継続する。
+
+    }
+
+  }
+
+
+  console.log(
+    'Yahoo Market Comps結果:',
+    'attempted=',
+    insertedItems.length,
+    'succeeded=',
+    succeeded,
+    'failed=',
+    failed
+  );
+
+
+  return {
+    attempted:
+      insertedItems.length,
+    succeeded,
+    failed
+  };
+
+}
+
+
+// ============================================================
 // 1条件分のMercari検索
 // ============================================================
 
@@ -1054,6 +2599,17 @@ async function scanMercariCondition(
 
 
   // ========================================================
+  // 新規商品だけYahoo Market Compsへ流す
+  // ========================================================
+
+  await runYahooMarketCompsForInsertedItems_(
+    page,
+    insertedItems,
+    config
+  );
+
+
+  // ========================================================
   // 既存Yahoo追跡レスポンスがある場合は件数だけ表示
   //
   // 大量JSONをログへ丸ごと出さない。
@@ -1173,7 +2729,14 @@ async function main() {
         userAgent:
           'Mozilla/5.0 (X11; Linux x86_64) ' +
           'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-          'Chrome/140.0.0.0 Safari/537.36'
+          'Chrome/140.0.0.0 Safari/537.36',
+
+        extraHTTPHeaders: {
+
+          'Accept-Language':
+            'ja-JP,ja;q=0.9,en;q=0.8'
+
+        }
 
       }
     );
