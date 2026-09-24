@@ -12,6 +12,23 @@ const MAX_SEARCH_ITEMS =
   10;
 
 // ============================================================
+// Apps Script 通信リトライ設定
+//
+// Google ContentService の一時404 / HTML応答 / 一時通信失敗で
+// 監視全体を落とさないため、同じPOSTを最大3回まで再試行する。
+// ============================================================
+
+const APPS_SCRIPT_MAX_ATTEMPTS =
+  3;
+
+const APPS_SCRIPT_RETRY_DELAYS_MS =
+  [
+    0,
+    2500,
+    6000
+  ];
+
+// ============================================================
 // Yahoo Market Comps 設定
 //
 // 新規Mercari商品だけを対象に、
@@ -67,133 +84,375 @@ if (
 // ============================================================
 // Apps Script共通POST
 //
-// getConfig / 商品送信を
+// getConfig / 商品送信 / Market Comps保存を
 // 完全に同じ通信方式へ統一する。
 //
-// Apps Script ContentService側の
-// リダイレクトはfetchへ任せる。
+// Google Apps Script ContentService は
+// script.googleusercontent.com へ一時URLを返すことがあるため、
+// 一時404 / 5xx / HTML応答 / 通信エラー時だけ
+// 新しいPOSTから最大3回まで再試行する。
 // ============================================================
+
+function sleep_(
+  milliseconds
+) {
+
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        milliseconds
+      )
+  );
+
+}
+
+
+function isRetryableAppsScriptStatus_(
+  status
+) {
+
+  return [
+    404,
+    408,
+    425,
+    429,
+    500,
+    502,
+    503,
+    504
+  ].includes(
+    Number(
+      status
+    )
+  );
+
+}
+
+
+function looksLikeAppsScriptHtml_(
+  text,
+  contentType
+) {
+
+  const normalizedContentType =
+    String(
+      contentType ||
+      ''
+    ).toLowerCase();
+
+
+  const normalizedText =
+    String(
+      text ||
+      ''
+    ).trim();
+
+
+  return (
+    normalizedContentType.includes(
+      'text/html'
+    )
+    ||
+    /^<!doctype\s+html/i.test(
+      normalizedText
+    )
+    ||
+    /^<html/i.test(
+      normalizedText
+    )
+  );
+
+}
+
 
 async function postAppsScriptJson(
   payload,
   label
 ) {
 
-  const response =
-    await fetch(
-      INGEST_URL,
-      {
-
-        method:
-          'POST',
-
-        redirect:
-          'follow',
-
-        headers: {
-
-          'Content-Type':
-            'application/json'
-
-        },
-
-        body:
-          JSON.stringify(
-            payload
-          )
-
-      }
-    );
+  let lastError =
+    null;
 
 
-  const text =
-    await response.text();
-
-
-  const contentType =
-    response.headers.get(
-      'content-type'
-    ) || '';
-
-
-  console.log(
-    `[${label}] HTTP:`,
-    response.status
-  );
-
-
-  console.log(
-    `[${label}] Final URL:`,
-    response.url
-  );
-
-
-  console.log(
-    `[${label}] Content-Type:`,
-    contentType
-  );
-
-
-  if (
-    !response.ok
+  for (
+    let attempt = 1;
+    attempt <= APPS_SCRIPT_MAX_ATTEMPTS;
+    attempt++
   ) {
 
-    console.log(
-      `[${label}] Response head:`,
-      text.slice(
-        0,
-        1200
-      )
-    );
-
-
-    throw new Error(
-      `${label} HTTP失敗: ${response.status}`
-    );
-
-  }
-
-
-  let result;
-
-
-  try {
-
-    result =
-      JSON.parse(
-        text
+    const delayMs =
+      Number(
+        APPS_SCRIPT_RETRY_DELAYS_MS[
+          attempt - 1
+        ] ||
+        0
       );
 
-  } catch (error) {
+
+    if (
+      delayMs > 0
+    ) {
+
+      console.warn(
+        `[${label}] retry wait:`,
+        delayMs,
+        'ms'
+      );
+
+
+      await sleep_(
+        delayMs
+      );
+
+    }
+
 
     console.log(
-      `[${label}] Response head:`,
-      text.slice(
-        0,
-        1200
-      )
+      `[${label}] Attempt:`,
+      `${attempt}/${APPS_SCRIPT_MAX_ATTEMPTS}`
     );
 
 
-    throw new Error(
-      `${label}応答がJSONではありません`
+    let response;
+
+
+    try {
+
+      response =
+        await fetch(
+          INGEST_URL,
+          {
+
+            method:
+              'POST',
+
+            redirect:
+              'follow',
+
+            headers: {
+
+              'Content-Type':
+                'application/json'
+
+            },
+
+            body:
+              JSON.stringify(
+                payload
+              )
+
+          }
+        );
+
+    } catch (error) {
+
+      lastError =
+        new Error(
+          `${label}通信失敗: ${
+            error &&
+            error.message
+              ? error.message
+              : String(error)
+          }`
+        );
+
+
+      console.error(
+        `[${label}] fetch error:`,
+        lastError.message
+      );
+
+
+      if (
+        attempt <
+        APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+
+        console.warn(
+          `[${label}] 一時通信失敗として再試行します`
+        );
+
+
+        continue;
+
+      }
+
+
+      throw lastError;
+
+    }
+
+
+    const text =
+      await response.text();
+
+
+    const contentType =
+      response.headers.get(
+        'content-type'
+      ) || '';
+
+
+    console.log(
+      `[${label}] HTTP:`,
+      response.status
     );
+
+
+    console.log(
+      `[${label}] Final URL:`,
+      response.url
+    );
+
+
+    console.log(
+      `[${label}] Content-Type:`,
+      contentType
+    );
+
+
+    if (
+      !response.ok
+    ) {
+
+      console.log(
+        `[${label}] Response head:`,
+        text.slice(
+          0,
+          1200
+        )
+      );
+
+
+      lastError =
+        new Error(
+          `${label} HTTP失敗: ${response.status}`
+        );
+
+
+      if (
+        isRetryableAppsScriptStatus_(
+          response.status
+        )
+        &&
+        attempt <
+        APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+
+        console.warn(
+          `[${label}] HTTP ${response.status} を一時エラーとして再試行します`
+        );
+
+
+        continue;
+
+      }
+
+
+      throw lastError;
+
+    }
+
+
+    let result;
+
+
+    try {
+
+      result =
+        JSON.parse(
+          text
+        );
+
+    } catch (error) {
+
+      console.log(
+        `[${label}] Response head:`,
+        text.slice(
+          0,
+          1200
+        )
+      );
+
+
+      lastError =
+        new Error(
+          `${label}応答がJSONではありません`
+        );
+
+
+      const retryableBody =
+        looksLikeAppsScriptHtml_(
+          text,
+          contentType
+        )
+        ||
+        !String(
+          contentType ||
+          ''
+        )
+          .toLowerCase()
+          .includes(
+            'json'
+          );
+
+
+      if (
+        retryableBody
+        &&
+        attempt <
+        APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+
+        console.warn(
+          `[${label}] HTML/非JSON応答を一時エラーとして再試行します`
+        );
+
+
+        continue;
+
+      }
+
+
+      throw lastError;
+
+    }
+
+
+    if (
+      result.ok !== true
+    ) {
+
+      throw new Error(
+        `${label}側エラー: ${JSON.stringify(result)}`
+      );
+
+    }
+
+
+    if (
+      attempt > 1
+    ) {
+
+      console.log(
+        `[${label}] ✅ retry success on attempt ${attempt}`
+      );
+
+    }
+
+
+    return result;
 
   }
 
 
-  if (
-    result.ok !== true
-  ) {
-
-    throw new Error(
-      `${label}側エラー: ${JSON.stringify(result)}`
-    );
-
-  }
-
-
-  return result;
+  throw (
+    lastError ||
+    new Error(
+      `${label} Apps Script通信に失敗しました`
+    )
+  );
 
 }
 
@@ -2750,7 +3009,18 @@ async function main() {
 
     // ======================================================
     // ON条件を順番に監視
+    //
+    // 1条件が最大3回のApps Script再送でも失敗した場合、
+    // その条件だけ失敗として記録して次条件へ進む。
     // ======================================================
+
+    let succeededConditions =
+      0;
+
+
+    const failedConditions =
+      [];
+
 
     for (
       let i = 0;
@@ -2774,14 +3044,62 @@ async function main() {
       );
 
 
-      await scanMercariCondition(
-        page,
-        config
-      );
+      try {
+
+        await scanMercariCondition(
+          page,
+          config
+        );
+
+
+        succeededConditions++;
+
+      } catch (error) {
+
+        const failure = {
+
+          conditionId:
+            config.conditionId ||
+            'UNKNOWN',
+
+          searchName:
+            config.searchName ||
+            '',
+
+          error:
+            error &&
+            error.message
+              ? error.message
+              : String(error)
+
+        };
+
+
+        failedConditions.push(
+          failure
+        );
+
+
+        console.error(
+          '⚠️ 条件監視失敗。次の条件へ継続します:',
+          JSON.stringify(
+            failure
+          )
+        );
+
+
+        console.error(
+          error &&
+          error.stack
+            ? error.stack
+            : error
+        );
+
+      }
 
 
       await page.waitForTimeout(
-        500
+        800
       );
 
     }
@@ -2793,8 +3111,61 @@ async function main() {
 
 
     console.log(
-      '✅ Mercari Config Discovery + Monitor SUCCESS'
+      'Mercari監視結果:',
+      'total=',
+      configs.length,
+      'succeeded=',
+      succeededConditions,
+      'failed=',
+      failedConditions.length
     );
+
+
+    if (
+      failedConditions.length > 0
+    ) {
+
+      console.warn(
+        '失敗条件一覧:',
+        JSON.stringify(
+          failedConditions
+        )
+      );
+
+    }
+
+
+    if (
+      succeededConditions === 0
+      &&
+      failedConditions.length > 0
+    ) {
+
+      throw new Error(
+        '全監視条件が失敗しました: ' +
+        JSON.stringify(
+          failedConditions
+        )
+      );
+
+    }
+
+
+    if (
+      failedConditions.length > 0
+    ) {
+
+      console.log(
+        '⚠️ Mercari Config Discovery + Monitor PARTIAL SUCCESS'
+      );
+
+    } else {
+
+      console.log(
+        '✅ Mercari Config Discovery + Monitor SUCCESS'
+      );
+
+    }
 
 
     console.log(
