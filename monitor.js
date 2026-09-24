@@ -763,35 +763,179 @@ async function sendToAppsScript(
   };
 
 
-  const response =
-    await fetch(
-      INGEST_URL,
-      {
-
-        method:
-          'POST',
-
-        redirect:
-          'follow',
-
-        headers: {
-
-          'Content-Type':
-            'application/json'
-
-        },
-
-        body:
-          JSON.stringify(
-            payload
-          )
-
-      }
+  const requestBody =
+    JSON.stringify(
+      payload
     );
 
 
-  const text =
-    await response.text();
+  const requestHeaders = {
+
+    'Content-Type':
+      'application/json'
+
+  };
+
+
+  let currentUrl =
+    INGEST_URL;
+
+
+  let response =
+    null;
+
+
+  let text =
+    '';
+
+
+  let completed =
+    false;
+
+
+  for (
+    let hop = 0;
+    hop < 6;
+    hop++
+  ) {
+
+    response =
+      await fetch(
+        currentUrl,
+        {
+
+          method:
+            'POST',
+
+          redirect:
+            'manual',
+
+          headers:
+            requestHeaders,
+
+          body:
+            requestBody
+
+        }
+      );
+
+
+    console.log(
+      'Apps Script Initial HTTP:',
+      response.status
+    );
+
+
+    if (
+      response.status !== 301 &&
+      response.status !== 302 &&
+      response.status !== 303 &&
+      response.status !== 307 &&
+      response.status !== 308
+    ) {
+
+      text =
+        await response.text();
+
+      completed =
+        true;
+
+      break;
+
+    }
+
+
+    const location =
+      response.headers.get(
+        'location'
+      );
+
+
+    if (!location) {
+
+      throw new Error(
+        'Apps Scriptリダイレクト先URLがありません'
+      );
+
+    }
+
+
+    const redirectUrl =
+      new URL(
+        location,
+        currentUrl
+      );
+
+
+    console.log(
+      'Apps Script Redirect:',
+      response.status,
+      redirectUrl.hostname
+    );
+
+
+    if (
+      redirectUrl.hostname ===
+      'script.googleusercontent.com'
+    ) {
+
+      response =
+        await fetch(
+          redirectUrl.toString(),
+          {
+
+            method:
+              'GET',
+
+            redirect:
+              'follow'
+
+          }
+        );
+
+
+      text =
+        await response.text();
+
+
+      completed =
+        true;
+
+
+      break;
+
+    }
+
+
+    if (
+      redirectUrl.hostname !==
+      'script.google.com'
+    ) {
+
+      throw new Error(
+        '想定外のApps Scriptリダイレクト先: ' +
+        redirectUrl.hostname
+      );
+
+    }
+
+
+    currentUrl =
+      redirectUrl.toString();
+
+  }
+
+
+  if (
+    !completed ||
+    !response
+  ) {
+
+    throw new Error(
+      'Apps Scriptリダイレクト回数が上限を超えました'
+    );
+
+  }
 
 
   console.log(
@@ -811,34 +955,24 @@ async function sendToAppsScript(
   ) {
 
     throw new Error(
-      'Apps Script送信失敗'
+      'Apps Script送信失敗: HTTP ' +
+      response.status +
+      ' / ' +
+      text
     );
 
   }
 
 
+  let result;
+
+
   try {
 
-    const result =
+    result =
       JSON.parse(
         text
       );
-
-
-    if (
-      result.ok !== true
-    ) {
-
-      throw new Error(
-        'Apps Script側エラー: ' +
-        text
-      );
-
-    }
-
-
-    return result;
-
 
   } catch (error) {
 
@@ -848,6 +982,21 @@ async function sendToAppsScript(
     );
 
   }
+
+
+  if (
+    result.ok !== true
+  ) {
+
+    throw new Error(
+      'Apps Script側エラー: ' +
+      text
+    );
+
+  }
+
+
+  return result;
 
 }
 
