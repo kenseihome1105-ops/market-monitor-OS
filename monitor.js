@@ -3,9 +3,6 @@ const { chromium } = require('playwright');
 
 // ============================================================
 // 基本設定
-//
-// 検索条件は「市場監視設定」から取得する。
-// 1条件あたりの取得件数は、現在の小規模本番を維持して10件。
 // ============================================================
 
 const MARKET =
@@ -39,51 +36,43 @@ if (
 
 
 // ============================================================
-// 市場監視設定取得
+// Apps Script共通POST
 //
-// market-ingest の getConfig を使用し、
-// 「市場監視設定」で ON のMercari条件だけ取得する。
+// getConfig / 商品送信を
+// 完全に同じ通信方式へ統一する。
 //
-// 検索URL / 条件IDはコードへ固定しない。
+// Apps Script ContentService側の
+// リダイレクトはfetchへ任せる。
 // ============================================================
 
-async function getMercariConfigs() {
-
-  console.log(
-    '=============================='
-  );
-
-  console.log(
-    'Mercari 市場監視設定を取得'
-  );
-
+async function postAppsScriptJson(
+  payload,
+  label
+) {
 
   const response =
     await fetch(
       INGEST_URL,
       {
+
         method:
           'POST',
 
+        redirect:
+          'follow',
+
         headers: {
+
           'Content-Type':
             'application/json'
+
         },
 
         body:
-          JSON.stringify({
-            secret:
-              INGEST_SECRET,
+          JSON.stringify(
+            payload
+          )
 
-            action:
-              'getConfig',
-
-            market:
-              MARKET
-          }),
-
-        redirect:
-          'follow'
       }
     );
 
@@ -92,46 +81,130 @@ async function getMercariConfigs() {
     await response.text();
 
 
+  const contentType =
+    response.headers.get(
+      'content-type'
+    ) || '';
+
+
+  console.log(
+    `[${label}] HTTP:`,
+    response.status
+  );
+
+
+  console.log(
+    `[${label}] Final URL:`,
+    response.url
+  );
+
+
+  console.log(
+    `[${label}] Content-Type:`,
+    contentType
+  );
+
+
+  if (
+    !response.ok
+  ) {
+
+    console.log(
+      `[${label}] Response head:`,
+      text.slice(
+        0,
+        1200
+      )
+    );
+
+
+    throw new Error(
+      `${label} HTTP失敗: ${response.status}`
+    );
+
+  }
+
+
   let result;
 
 
   try {
 
     result =
-      JSON.parse(text);
+      JSON.parse(
+        text
+      );
 
   } catch (error) {
 
     console.log(
-      'Apps Script Response:',
-      text
+      `[${label}] Response head:`,
+      text.slice(
+        0,
+        1200
+      )
     );
 
+
     throw new Error(
-      'Config応答がJSONではありません'
+      `${label}応答がJSONではありません`
     );
 
   }
 
 
-  if (!response.ok) {
+  if (
+    result.ok !== true
+  ) {
 
     throw new Error(
-      'Config HTTP失敗: ' +
-      response.status
+      `${label}側エラー: ${JSON.stringify(result)}`
     );
 
   }
 
 
-  if (!result.ok) {
+  return result;
 
-    throw new Error(
-      'Config取得失敗: ' +
-      text
+}
+
+
+// ============================================================
+// 市場監視設定取得
+//
+// 「市場監視設定」で
+// ONになっているMercari条件だけ取得する。
+// ============================================================
+
+async function getMercariConfigs() {
+
+  console.log(
+    '=============================='
+  );
+
+
+  console.log(
+    'Mercari 市場監視設定を取得'
+  );
+
+
+  const result =
+    await postAppsScriptJson(
+      {
+
+        secret:
+          INGEST_SECRET,
+
+        action:
+          'getConfig',
+
+        market:
+          MARKET
+
+      },
+
+      'Config'
     );
-
-  }
 
 
   const configs =
@@ -142,18 +215,14 @@ async function getMercariConfigs() {
       : [];
 
 
-  const validConfigs = [];
+  const validConfigs =
+    [];
 
 
   for (
-    let i = 0;
-    i < configs.length;
-    i++
+    const config
+    of configs
   ) {
-
-    const config =
-      configs[i];
-
 
     if (
       !config ||
@@ -162,10 +231,12 @@ async function getMercariConfigs() {
 
       console.log(
         '⚠️ Mercari以外の設定をスキップ:',
-        config && config.conditionId
+        config &&
+        config.conditionId
           ? config.conditionId
           : 'UNKNOWN'
       );
+
 
       continue;
 
@@ -179,7 +250,9 @@ async function getMercariConfigs() {
 
       throw new Error(
         '市場監視設定が不正です: ' +
-        JSON.stringify(config)
+        JSON.stringify(
+          config
+        )
       );
 
     }
@@ -194,17 +267,20 @@ async function getMercariConfigs() {
       '------------------------------'
     );
 
+
     console.log(
       `[${validConfigs.length}]`,
       config.conditionId,
       config.searchName || ''
     );
 
+
     console.log(
       '監視頻度:',
       config.intervalMinutes,
       '分'
     );
+
 
     console.log(
       '検索URL:',
@@ -230,7 +306,9 @@ async function getMercariConfigs() {
 // Mercari URL → 商品ID
 // ============================================================
 
-function parseMercariUrl(href) {
+function parseMercariUrl(
+  href
+) {
 
   try {
 
@@ -241,14 +319,19 @@ function parseMercariUrl(href) {
       );
 
 
+    // ========================================================
     // 通常商品
+    // ========================================================
+
     const normal =
       url.pathname.match(
         /^\/item\/(m\d+)/i
       );
 
 
-    if (normal) {
+    if (
+      normal
+    ) {
 
       return {
 
@@ -263,14 +346,19 @@ function parseMercariUrl(href) {
     }
 
 
+    // ========================================================
     // Mercari Shops
+    // ========================================================
+
     const shop =
       url.pathname.match(
         /^\/shops\/product\/([A-Za-z0-9_-]+)/i
       );
 
 
-    if (shop) {
+    if (
+      shop
+    ) {
 
       return {
 
@@ -301,14 +389,20 @@ function parseMercariUrl(href) {
 // 地域確認などが出た場合だけ押す
 // ============================================================
 
-async function dismissRegionGate(page) {
+async function dismissRegionGate(
+  page
+) {
 
   const patterns = [
 
     /日本の商品を見る/i,
+
     /日本で続行/i,
+
     /日本で見る/i,
+
     /^続ける$/i,
+
     /^Continue$/i
 
   ];
@@ -335,19 +429,23 @@ async function dismissRegionGate(page) {
 
       if (
         await button.isVisible({
-          timeout: 700
+          timeout:
+            700
         })
       ) {
 
         await button.click();
 
+
         await page.waitForTimeout(
           1500
         );
 
+
         console.log(
           '地域確認を処理しました'
         );
+
 
         return;
 
@@ -368,7 +466,9 @@ async function dismissRegionGate(page) {
 // 商品が読み込まれるまで軽くスクロール
 // ============================================================
 
-async function loadListings(page) {
+async function loadListings(
+  page
+) {
 
   for (
     let i = 0;
@@ -451,16 +551,18 @@ async function extractMercariItems(
             '';
 
 
-          if (!href) {
+          if (
+            !href
+          ) {
 
             continue;
 
           }
 
 
-          // ----------------------------------------------
+          // ==================================================
           // 商品カード全体っぽい親要素を探す
-          // ----------------------------------------------
+          // ==================================================
 
           let node =
             anchor;
@@ -479,7 +581,8 @@ async function extractMercariItems(
 
             const text =
               String(
-                node.innerText || ''
+                node.innerText ||
+                ''
               )
                 .replace(
                   /\s+/g,
@@ -499,6 +602,7 @@ async function extractMercariItems(
               cardText =
                 text;
 
+
               break;
 
             }
@@ -516,7 +620,9 @@ async function extractMercariItems(
             );
 
 
-          if (!priceMatch) {
+          if (
+            !priceMatch
+          ) {
 
             continue;
 
@@ -533,16 +639,18 @@ async function extractMercariItems(
             );
 
 
-          if (!price) {
+          if (
+            !price
+          ) {
 
             continue;
 
           }
 
 
-          // ----------------------------------------------
+          // ==================================================
           // タイトル取得
-          // ----------------------------------------------
+          // ==================================================
 
           let title =
             String(
@@ -554,7 +662,9 @@ async function extractMercariItems(
               .trim();
 
 
-          if (!title) {
+          if (
+            !title
+          ) {
 
             const image =
               anchor.querySelector(
@@ -562,7 +672,9 @@ async function extractMercariItems(
               );
 
 
-            if (image) {
+            if (
+              image
+            ) {
 
               title =
                 String(
@@ -578,7 +690,9 @@ async function extractMercariItems(
           }
 
 
-          if (!title) {
+          if (
+            !title
+          ) {
 
             title =
               String(
@@ -618,7 +732,9 @@ async function extractMercariItems(
           }
 
 
-          if (!title) {
+          if (
+            !title
+          ) {
 
             continue;
 
@@ -628,7 +744,9 @@ async function extractMercariItems(
           results.push({
 
             href,
+
             title,
+
             price
 
           });
@@ -643,7 +761,7 @@ async function extractMercariItems(
 
 
   // ========================================================
-  // 同じ商品URLがDOM内に複数あっても1件にする
+  // DOM内で同一商品URLが複数あっても1件にする
   // ========================================================
 
   const map =
@@ -661,7 +779,9 @@ async function extractMercariItems(
       );
 
 
-    if (!parsed) {
+    if (
+      !parsed
+    ) {
 
       continue;
 
@@ -674,7 +794,9 @@ async function extractMercariItems(
       );
 
 
-    if (!existing) {
+    if (
+      !existing
+    ) {
 
       map.set(
         parsed.itemId,
@@ -695,10 +817,13 @@ async function extractMercariItems(
         }
       );
 
-
     } else {
 
-      // タイトルが複数候補ある場合は長い方を採用
+
+      // ====================================================
+      // タイトル候補が複数ある場合
+      // 長い方を優先
+      // ====================================================
 
       if (
         row.title.length >
@@ -738,7 +863,7 @@ async function extractMercariItems(
 
 
 // ============================================================
-// Apps Scriptへ送信
+// Apps Scriptへ商品送信
 // ============================================================
 
 async function sendToAppsScript(
@@ -746,113 +871,28 @@ async function sendToAppsScript(
   conditionId
 ) {
 
-  const payload = {
+  return postAppsScriptJson(
+    {
 
-    secret:
-      INGEST_SECRET,
+      secret:
+        INGEST_SECRET,
 
-    market:
-      MARKET,
+      market:
+        MARKET,
 
-    conditionId:
-      conditionId,
+      conditionId:
+        conditionId,
 
-    items:
-      items
+      items:
+        items
 
-  };
+    },
 
-
-  const response =
-    await fetch(
-      INGEST_URL,
-      {
-
-        method:
-          'POST',
-
-        redirect:
-          'follow',
-
-        headers: {
-          'Content-Type':
-            'application/json'
-        },
-
-        body:
-          JSON.stringify(
-            payload
-          )
-
-      }
-    );
-
-
-  const text =
-    await response.text();
-
-
-  console.log(
-    'Apps Script HTTP:',
-    response.status
+    `Ingest ${conditionId}`
   );
-
-
-  console.log(
-    'Apps Script Response:',
-    text
-  );
-
-
-  if (
-    !response.ok
-  ) {
-
-    throw new Error(
-      'Apps Script送信失敗: HTTP ' +
-      response.status +
-      ' / ' +
-      text
-    );
-
-  }
-
-
-  let result;
-
-
-  try {
-
-    result =
-      JSON.parse(
-        text
-      );
-
-  } catch (error) {
-
-    throw new Error(
-      'Apps Script応答解析失敗: ' +
-      text
-    );
-
-  }
-
-
-  if (
-    result.ok !== true
-  ) {
-
-    throw new Error(
-      'Apps Script側エラー: ' +
-      text
-    );
-
-  }
-
-
-  return result;
 
 }
+
 
 // ============================================================
 // 1条件分のMercari検索
@@ -867,11 +907,13 @@ async function scanMercariCondition(
     '=============================='
   );
 
+
   console.log(
     '条件:',
     config.conditionId,
     config.searchName || ''
   );
+
 
   console.log(
     'Mercari検索ページを開きます'
@@ -957,25 +999,78 @@ async function scanMercariCondition(
     '------------------------------'
   );
 
+
   console.log(
     '条件ID:',
     config.conditionId
   );
+
 
   console.log(
     '受信件数:',
     result.received
   );
 
+
   console.log(
     '新規:',
     result.inserted
   );
 
+
   console.log(
     '更新:',
     result.updated
   );
+
+
+  // ========================================================
+  // 今後のMarket Comps接続用
+  //
+  // Apps ScriptがinsertedItemsを返せる場合だけ
+  // 新規商品ID一覧をログへ出す。
+  // ========================================================
+
+  const insertedItems =
+    Array.isArray(
+      result.insertedItems
+    )
+      ? result.insertedItems
+      : [];
+
+
+  console.log(
+    'insertedItems件数:',
+    insertedItems.length
+  );
+
+
+  console.log(
+    'insertedItems:',
+    JSON.stringify(
+      insertedItems
+    )
+  );
+
+
+  // ========================================================
+  // 既存Yahoo追跡レスポンスがある場合は件数だけ表示
+  //
+  // 大量JSONをログへ丸ごと出さない。
+  // ========================================================
+
+  if (
+    Array.isArray(
+      result.trackedYahoo
+    )
+  ) {
+
+    console.log(
+      'trackedYahoo件数:',
+      result.trackedYahoo.length
+    );
+
+  }
 
 
   return result;
@@ -993,9 +1088,11 @@ async function main() {
     '=============================='
   );
 
+
   console.log(
     'Market Monitor OS START'
   );
+
 
   console.log(
     '市場:',
@@ -1019,14 +1116,20 @@ async function main() {
       '=============================='
     );
 
+
     console.log(
       'MercariのON監視条件が0件のため終了します'
     );
+
 
     return;
 
   }
 
+
+  // ========================================================
+  // Chromium
+  // ========================================================
 
   const browser =
     await chromium.launch(
@@ -1082,6 +1185,10 @@ async function main() {
 
   try {
 
+    // ======================================================
+    // ON条件を順番に監視
+    // ======================================================
+
     for (
       let i = 0;
       i < configs.length;
@@ -1095,6 +1202,7 @@ async function main() {
       console.log(
         '=============================='
       );
+
 
       console.log(
         `[条件 ${i + 1}/${configs.length}]`,
@@ -1120,9 +1228,11 @@ async function main() {
       '=============================='
     );
 
+
     console.log(
       '✅ Mercari Config Discovery + Monitor SUCCESS'
     );
+
 
     console.log(
       '=============================='
@@ -1133,7 +1243,9 @@ async function main() {
 
     await page.close();
 
+
     await context.close();
+
 
     await browser.close();
 
@@ -1142,6 +1254,10 @@ async function main() {
 }
 
 
+// ============================================================
+// 実行
+// ============================================================
+
 main()
   .catch(
     error => {
@@ -1149,6 +1265,7 @@ main()
       console.error(
         'MONITOR ERROR'
       );
+
 
       console.error(
         error
