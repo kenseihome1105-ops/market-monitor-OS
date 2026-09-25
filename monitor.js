@@ -37,7 +37,7 @@ const APPS_SCRIPT_RETRY_DELAYS_MS =
 // ============================================================
 
 const MARKET_COMPS_SOURCE_VERSION =
-  'yahoo-comps-v2';
+  'yahoo-comps-v3-dbmeta';
 
 const MARKET_COMPS_MAX_ITEMS =
   marketCompsPositiveInt_(
@@ -51,11 +51,11 @@ const MARKET_COMPS_TIMEOUT_MS =
     60000
   );
 
-const MARKET_COMPS_DEFAULT_CATEGORY_ID =
+const MARKET_COMPS_FALLBACK_CATEGORY_ID =
   String(
     process.env.COMP_CATEGORY_ID ||
-    '23176'
-  ).trim();
+    '0'
+  ).trim() || '0';
 
 
 // ============================================================
@@ -2209,6 +2209,41 @@ function buildMarketCompsTarget_(
         ''
       ).trim(),
 
+    product:
+      String(
+        insertedItem &&
+        insertedItem.product ||
+        ''
+      ).trim(),
+
+    model:
+      String(
+        insertedItem &&
+        insertedItem.model ||
+        ''
+      ).trim(),
+
+    searchKeyword:
+      String(
+        insertedItem &&
+        insertedItem.searchKeyword ||
+        ''
+      ).trim(),
+
+    subCategory:
+      String(
+        insertedItem &&
+        insertedItem.subCategory ||
+        ''
+      ).trim(),
+
+    lineModel:
+      String(
+        insertedItem &&
+        insertedItem.lineModel ||
+        ''
+      ).trim(),
+
     currentPrice:
       Number(
         insertedItem &&
@@ -2223,38 +2258,250 @@ function buildMarketCompsTarget_(
 }
 
 
+function compactMarketCompsQueryText_(
+  value
+) {
+
+  return String(
+    value || ''
+  )
+    .replace(
+      /のサムネイル$/i,
+      ''
+    )
+    .replace(
+      /[\/／|｜]+/g,
+      ' '
+    )
+    .replace(
+      /\s+/g,
+      ' '
+    )
+    .trim();
+
+}
+
+
 function buildMarketCompsQuery_(
   insertedItem,
   config
 ) {
 
-  const fromConfig =
-    String(
-      config &&
-      config.searchName ||
-      ''
-    ).trim();
+  // 商品マスター AA列「検索キーワード」を最優先。
+  // config.searchName は監視条件名なので相場検索には使わない。
 
+  const fromMaster =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.searchKeyword ||
+      ''
+    );
 
   if (
-    fromConfig
+    fromMaster
   ) {
 
-    return fromConfig;
-
+    return fromMaster;
   }
 
 
-  return String(
+  const brand =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.brand ||
+      ''
+    );
+
+  const product =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.product ||
+      ''
+    );
+
+  const subCategory =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.subCategory ||
+      ''
+    );
+
+
+  const parts =
+    [];
+
+  if (brand) {
+    parts.push(
+      brand
+    );
+  }
+
+  if (product) {
+
+    parts.push(
+      product
+    );
+
+  } else if (
+    subCategory
+  ) {
+
+    parts.push(
+      subCategory
+    );
+  }
+
+
+  const fromDbMeta =
+    compactMarketCompsQueryText_(
+      parts.join(
+        ' '
+      )
+    );
+
+  if (
+    fromDbMeta
+  ) {
+
+    return fromDbMeta;
+  }
+
+
+  return compactMarketCompsQueryText_(
     insertedItem &&
     insertedItem.title ||
     ''
-  )
-    .replace(
-      /のサムネイル$/,
+  );
+
+}
+
+
+function buildMarketCompsCategoryId_(
+  insertedItem
+) {
+
+  const category =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.category ||
       ''
     )
-    .trim();
+      .normalize(
+        'NFKC'
+      )
+      .toUpperCase();
+
+  const product =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.product ||
+      ''
+    )
+      .normalize(
+        'NFKC'
+      )
+      .toUpperCase();
+
+  const subCategory =
+    compactMarketCompsQueryText_(
+      insertedItem &&
+      insertedItem.subCategory ||
+      ''
+    )
+      .normalize(
+        'NFKC'
+      )
+      .toUpperCase();
+
+
+  const allText =
+    [
+      category,
+      product,
+      subCategory
+    ].join(
+      ' '
+    );
+
+
+  if (
+    /レディース|WOMEN|WOMAN|LADIES/.test(
+      allText
+    )
+  ) {
+
+    return '0';
+  }
+
+
+  if (
+    /スラックス/.test(
+      product + ' ' + subCategory
+    )
+  ) {
+
+    return '2084007077';
+  }
+
+
+  if (
+    /メンズスーツ/.test(
+      category
+    )
+    ||
+    (
+      !/レディース/.test(
+        category
+      )
+      &&
+      /(?:スーツ|SUIT)/.test(
+        product + ' ' + subCategory
+      )
+    )
+  ) {
+
+    return '2084007041';
+  }
+
+
+  if (
+    /(?:チェスターコート|ステンカラーコート|トレンチコート|ダッフルコート|ノーカラーコート)/.test(
+      product
+    )
+  ) {
+
+    return '2084007042';
+  }
+
+
+  if (
+    /(?:テーラードジャケット|レザージャケット|スウィングトップ|スカジャン|スタジャン|ボンバージャケット|ダウンジャケット)/.test(
+      product
+    )
+  ) {
+
+    return '23196';
+  }
+
+
+  if (
+    /(?:ニット|セーター)/.test(
+      product
+    )
+    &&
+    !/カーディガン/.test(
+      product
+    )
+  ) {
+
+    return '2084005282';
+  }
+
+
+  return (
+    MARKET_COMPS_FALLBACK_CATEGORY_ID ||
+    '0'
+  );
 
 }
 
@@ -2280,18 +2527,21 @@ async function runYahooMarketCompsForTarget_(
 
 
   const categoryId =
-    MARKET_COMPS_DEFAULT_CATEGORY_ID;
+    buildMarketCompsCategoryId_(
+      insertedItem
+    );
 
 
   if (
     !target.itemId ||
     !target.url ||
     !target.title ||
-    !target.currentPrice
+    !target.currentPrice ||
+    !target.dbItemId
   ) {
 
     throw new Error(
-      'Yahoo Market Comps: 対象商品の必須情報が不足しています: ' +
+      'Yahoo Market Comps: DB同定済み対象の必須情報が不足しています: ' +
       JSON.stringify(
         target
       )
@@ -2337,6 +2587,30 @@ async function runYahooMarketCompsForTarget_(
   console.log(
     '対象商品:',
     target.title
+  );
+
+
+  console.log(
+    'DB商品ID:',
+    target.dbItemId
+  );
+
+
+  console.log(
+    'DBブランド:',
+    target.brand
+  );
+
+
+  console.log(
+    'DBカテゴリ:',
+    target.category
+  );
+
+
+  console.log(
+    'DB商品:',
+    target.product
   );
 
 
@@ -2858,7 +3132,7 @@ async function scanMercariCondition(
 
 
   // ========================================================
-  // 新規商品だけYahoo Market Compsへ流す
+  // DB同定済みMarket Comps対象だけYahooへ流す
   // ========================================================
 
   await runYahooMarketCompsForInsertedItems_(
