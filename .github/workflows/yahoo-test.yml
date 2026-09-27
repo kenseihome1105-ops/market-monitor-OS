@@ -5,10 +5,13 @@ on:
   schedule:
     - cron: '4-59/5 * * * *'
 
+concurrency:
+  group: market-monitor-os-production
+  cancel-in-progress: false
+
 jobs:
   yahoo-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
       - name: Checkout
