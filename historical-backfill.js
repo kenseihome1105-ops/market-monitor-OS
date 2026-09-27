@@ -7,7 +7,7 @@ const { chromium } = require('playwright');
 //   ↓
 // market-ingest: getHistoricalBackfillTargets
 //   ↓
-// Yahooオークション「終了180日間」
+// Mercari「売り切れ × 新着順」 + Yahooオークション「終了180日間 × 落札済み」
 //   ↓
 // 過去実売分布 + Historical Market Score
 //   ↓
@@ -16,7 +16,7 @@ const { chromium } = require('playwright');
 // 利益商品探索AI Y:AH
 //
 // このファイルは「売れた側（相場・需要）」を埋める。
-// 現行出品の仕入れ側（Mercari / Yahoo）は次段で同じDB商品へ結合する。
+// 現行出品の仕入れ側（Mercari / Yahoo）は別工程で同じDB商品へ結合する。
 // ============================================================
 
 const INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -31,6 +31,13 @@ const BATCH_LIMIT = positiveInt_(
 
 const MAX_SOLD_ITEMS = positiveInt_(
   process.env.HISTORICAL_MAX_SOLD_ITEMS,
+  50,
+  1,
+  50
+);
+
+const MAX_MERCARI_SOLD_ITEMS = positiveInt_(
+  process.env.HISTORICAL_MAX_MERCARI_SOLD_ITEMS,
   50,
   1,
   50
@@ -282,6 +289,332 @@ async function saveSummary_(target, summary) {
     },
     `Historical save ${target.dbItemId}`
   );
+}
+
+// ============================================================
+// Mercari売り切れ検索
+// ============================================================
+
+function normalizeMercariSoldUrl_(rawUrl) {
+  let url;
+
+  try {
+    url = new URL(String(rawUrl || '').trim());
+  } catch (error) {
+    throw new Error('相場URL_Mercari売切 が不正です');
+  }
+
+  if (
+    url.origin !== 'https://jp.mercari.com' ||
+    url.pathname !== '/search'
+  ) {
+    throw new Error('相場URL_Mercari売切 はMercari検索URLではありません');
+  }
+
+  // 4市場版 Apps Script のURLに加え、実行時にも売り切れ・新着順を固定する。
+  url.searchParams.set('status', 'sold_out');
+  url.searchParams.set('sort', 'created_time');
+  url.searchParams.set('order', 'desc');
+
+  return url.toString();
+}
+
+function parseMercariItemUrl_(href) {
+  try {
+    const url = new URL(href, 'https://jp.mercari.com');
+    const normal = url.pathname.match(/^\/item\/(m\d+)/i);
+
+    if (normal) {
+      return {
+        itemId: normal[1],
+        url: `https://jp.mercari.com/item/${normal[1]}`
+      };
+    }
+
+    const shop = url.pathname.match(/^\/shops\/product\/([A-Za-z0-9_-]+)/i);
+
+    if (shop) {
+      return {
+        itemId: `shops:${shop[1]}`,
+        url: `https://jp.mercari.com/shops/product/${shop[1]}`
+      };
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function dismissMercariRegionGate_(page) {
+  const patterns = [
+    /日本の商品を見る/i,
+    /日本で続行/i,
+    /日本で見る/i,
+    /^続ける$/i,
+    /^Continue$/i
+  ];
+
+  for (const pattern of patterns) {
+    try {
+      const button = page.getByRole('button', { name: pattern }).first();
+
+      if (await button.isVisible({ timeout: 700 })) {
+        await button.click();
+        await page.waitForTimeout(1500);
+        console.log('Mercari地域確認を処理しました');
+        return;
+      }
+    } catch (error) {
+      // 地域確認が表示されない場合はそのまま続ける。
+    }
+  }
+}
+
+async function loadMercariListings_(page) {
+  for (let i = 0; i < 6; i++) {
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 1.5);
+    });
+    await page.waitForTimeout(700);
+  }
+
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
+  });
+}
+
+async function extractMercariSoldItems_(page, limit) {
+  const raw = await page.evaluate(() => {
+    const yenRegex = /[¥￥]\s*([\d,]+)/;
+    const anchors = Array.from(
+      document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      )
+    );
+    const results = [];
+
+    for (const anchor of anchors) {
+      const href = anchor.href || anchor.getAttribute('href') || '';
+
+      if (!href) {
+        continue;
+      }
+
+      let node = anchor;
+      let cardText = '';
+
+      for (let depth = 0; depth < 7 && node; depth++) {
+        const text = String(node.innerText || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        if (yenRegex.test(text) && text.length < 1000) {
+          cardText = text;
+          break;
+        }
+
+        node = node.parentElement;
+      }
+
+      const priceMatch = cardText.match(yenRegex);
+
+      if (!priceMatch) {
+        continue;
+      }
+
+      const price = Number(priceMatch[1].replace(/,/g, ''));
+
+      if (!price) {
+        continue;
+      }
+
+      let title = String(anchor.getAttribute('aria-label') || '').trim();
+
+      if (!title) {
+        const image = anchor.querySelector('img');
+        title = image ? String(image.getAttribute('alt') || '').trim() : '';
+      }
+
+      if (!title) {
+        title = String(anchor.innerText || '')
+          .replace(/[¥￥]\s*[\d,]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      if (!title && cardText) {
+        title = cardText
+          .replace(/[¥￥]\s*[\d,]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      if (!title) {
+        continue;
+      }
+
+      results.push({ href, title, price });
+    }
+
+    return results;
+  });
+
+  const map = new Map();
+
+  for (const row of raw) {
+    const parsed = parseMercariItemUrl_(row.href);
+
+    if (!parsed) {
+      continue;
+    }
+
+    const existing = map.get(parsed.itemId);
+
+    if (!existing) {
+      map.set(parsed.itemId, {
+        itemId: parsed.itemId,
+        url: parsed.url,
+        title: row.title,
+        price: row.price
+      });
+      continue;
+    }
+
+    if (row.title.length > existing.title.length) {
+      existing.title = row.title;
+    }
+
+    if (row.price) {
+      existing.price = row.price;
+    }
+  }
+
+  return Array.from(map.values()).slice(0, limit);
+}
+
+// ============================================================
+// DB商品との類似度
+// ============================================================
+
+function normalizeMatchText_(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('ja-JP')
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function matchTerms_(value) {
+  const text = String(value || '').normalize('NFKC').toLocaleLowerCase('ja-JP');
+  const terms = text.match(/[a-z0-9]+|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u30fc]+/gu) || [];
+
+  return Array.from(new Set(
+    terms
+      .map(term => normalizeMatchText_(term))
+      .filter(term => term.length >= 2)
+  ));
+}
+
+function matchGroup_(title, value) {
+  const terms = matchTerms_(value);
+
+  if (!terms.length) {
+    return { terms: [], matched: false, ratio: 0 };
+  }
+
+  const titleText = normalizeMatchText_(title);
+  let hitWeight = 0;
+  let matchedTerms = 0;
+
+  for (const term of terms) {
+    if (titleText.includes(term)) {
+      hitWeight += 1;
+      matchedTerms++;
+      continue;
+    }
+
+    // Japanese product labels often contain a more specific phrase than the
+    // listing title. Allow one shared 3-character phrase at half weight;
+    // brand matching remains exact.
+    if (/[^\u0000-\u007f]/.test(term) && term.length >= 5) {
+      const grams = [];
+
+      for (let i = 0; i <= term.length - 3; i++) {
+        grams.push(term.slice(i, i + 3));
+      }
+
+      if (grams.some(gram => titleText.includes(gram))) {
+        hitWeight += 0.5;
+        matchedTerms++;
+      }
+    }
+  }
+
+  return {
+    terms,
+    matched: matchedTerms > 0,
+    ratio: hitWeight / terms.length
+  };
+}
+
+function scoreHistoricalTitleMatch_(target, title) {
+  const brand = matchGroup_(title, target.brand);
+  const product = matchGroup_(title, target.product);
+  const category = matchGroup_(title, target.category);
+  const keyword = matchGroup_(title, target.searchKeyword);
+
+  const hasBrand = brand.terms.length > 0;
+  const hasProduct = product.terms.length > 0;
+  const hasCategory = category.terms.length > 0;
+
+  const groups = [];
+  if (hasBrand) groups.push({ ratio: brand.ratio, weight: 0.45 });
+  if (hasProduct) groups.push({ ratio: product.ratio, weight: 0.40 });
+  if (hasCategory) groups.push({ ratio: category.ratio, weight: 0.15 });
+
+  if (!groups.length && keyword.terms.length) {
+    groups.push({ ratio: keyword.ratio, weight: 1 });
+  }
+
+  const totalWeight = groups.reduce((sum, group) => sum + group.weight, 0);
+  const score = totalWeight
+    ? groups.reduce((sum, group) => sum + group.ratio * group.weight, 0) / totalWeight
+    : 0;
+
+  const identityMatch = hasBrand
+    ? brand.matched && (product.matched || category.matched)
+    : hasProduct
+      ? product.matched || category.matched
+      : hasCategory
+        ? category.matched
+        : keyword.matched;
+
+  return {
+    accepted: identityMatch && score >= 0.35,
+    score: Math.round(score * 100)
+  };
+}
+
+function filterComparableItems_(target, items, marketLabel) {
+  const accepted = [];
+  let rejected = 0;
+
+  for (const item of items) {
+    const match = scoreHistoricalTitleMatch_(target, item.title);
+
+    if (match.accepted) {
+      accepted.push({ ...item, matchScore: match.score });
+    } else {
+      rejected++;
+    }
+  }
+
+  console.log(`${marketLabel}類似商品:`, accepted.length, '/', items.length);
+  if (rejected) {
+    console.log(`${marketLabel}類似度不足で除外:`, rejected);
+  }
+
+  return accepted;
 }
 
 // ============================================================
@@ -584,8 +917,7 @@ function summarizeHistorical_(target, items) {
   const score = buildHistoricalScore_(target, stats);
 
   return {
-    // Yahooの1ページから安全に確認できた実売件数。
-    // 50件を上限とし、ページ上の曖昧な総件数表示は採用しない。
+    // 各市場で重複URLを除いた比較可能商品数の合計。
     soldCount: prices.length,
     sampleCount: prices.length,
     minPrice: stats.minPrice,
@@ -599,19 +931,102 @@ function summarizeHistorical_(target, items) {
   };
 }
 
+function summarizeMarket_(items) {
+  const prices = items
+    .map(item => Number(item.price || 0))
+    .filter(price => Number.isFinite(price) && price > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    count: prices.length,
+    medianPrice: prices.length
+      ? Math.round(quantile_(prices, 0.5))
+      : 0
+  };
+}
+
+function classifyMarketSources_(mercari, yahoo) {
+  if (mercari.count === 0 && yahoo.count === 0) {
+    return 'データ不足';
+  }
+
+  if (mercari.count === 0 || yahoo.count === 0) {
+    return '片市場のみ';
+  }
+
+  const gapRate = Math.abs(mercari.medianPrice - yahoo.medianPrice) /
+    Math.max(mercari.medianPrice, yahoo.medianPrice);
+
+  // 価格差35%以上は、商品混在・モデル差・状態差などを再確認する。
+  if (gapRate >= 0.35) {
+    return '市場差大';
+  }
+
+  const volumeRatio = Math.max(mercari.count, yahoo.count) /
+    Math.min(mercari.count, yahoo.count);
+
+  if (volumeRatio >= 1.5) {
+    return mercari.count > yahoo.count ? 'Mercari優勢' : 'Yahoo優勢';
+  }
+
+  return '両市場一致';
+}
+
+function summarizeTwoMarkets_(target, mercariItems, yahooItems, marketStatus) {
+  const mercari = summarizeMarket_(mercariItems);
+  const yahoo = summarizeMarket_(yahooItems);
+  const combined = summarizeHistorical_(target, [
+    ...mercariItems,
+    ...yahooItems
+  ]);
+
+  const hasBothMarketMedians =
+    mercari.medianPrice > 0 && yahoo.medianPrice > 0;
+  const marketMedianGapRate = hasBothMarketMedians
+    ? Math.abs(mercari.medianPrice - yahoo.medianPrice) /
+      Math.max(mercari.medianPrice, yahoo.medianPrice)
+    // upsertHistoricalBackfill_ treats a JSON null as zero. "NaN" converts to
+    // a non-finite number there, so the sheet leaves an unavailable gap blank.
+    : 'NaN';
+
+  const state = marketStatus.mercariSucceeded && marketStatus.yahooSucceeded
+    ? (combined.sampleCount > 0 ? '取得済' : '0件')
+    : '一部取得失敗';
+
+  return {
+    ...combined,
+    soldCount: mercari.count + yahoo.count,
+    sampleCount: mercari.count + yahoo.count,
+    mercariSoldCount: mercari.count,
+    mercariMedianPrice: mercari.medianPrice,
+    yahooSoldCount: yahoo.count,
+    yahooMedianPrice: yahoo.medianPrice,
+    marketMedianGapRate,
+    sourceJudgement: classifyMarketSources_(mercari, yahoo),
+    state
+  };
+}
+
 // ============================================================
 // 1商品
 // ============================================================
 
 async function runTarget_(page, target) {
-  const url = String(target.yahooHistoricalUrl || '').trim();
-
   if (!target.dbItemId) {
     throw new Error('DB商品IDがありません');
   }
 
-  if (!url) {
-    throw new Error(`${target.dbItemId}: 相場URL_Yahoo180 がありません`);
+  let mercariUrl = '';
+  let mercariUrlError = '';
+  const yahooUrl = String(target.yahooHistoricalUrl || '').trim();
+  const marketErrors = [];
+
+  try {
+    mercariUrl = normalizeMercariSoldUrl_(target.mercariHistoricalUrl);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    mercariUrlError = message;
+    console.error(`[${target.dbItemId}] Mercari売切 URL不正:`, message);
   }
 
   console.log('========================================');
@@ -623,60 +1038,148 @@ async function runTarget_(page, target) {
   console.log('検索語:', target.searchKeyword || '');
   console.log('仕入URL Mercari:', target.mercariBuyUrl || '');
   console.log('仕入URL Yahoo:', target.yahooBuyUrl || '');
-  console.log('相場URL Yahoo180:', url);
+  console.log('相場URL Mercari売切:', mercariUrl);
+  console.log('相場URL Yahoo180:', yahooUrl);
 
-  const response = await page.goto(
-    url,
-    {
-      waitUntil: 'domcontentloaded',
-      timeout: PAGE_TIMEOUT_MS
+  const mercariItems = [];
+  const yahooItems = [];
+  const marketStatus = {
+    mercariSucceeded: false,
+    yahooSucceeded: false
+  };
+
+  try {
+    if (!mercariUrl) {
+      throw new Error(mercariUrlError || '相場URL_Mercari売切 がありません');
     }
-  );
 
-  if (!response) {
-    throw new Error(`${target.dbItemId}: Yahoo HTTPレスポンスなし`);
+    const response = await page.goto(
+      mercariUrl,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_TIMEOUT_MS
+      }
+    );
+
+    if (!response) {
+      throw new Error('Mercari HTTPレスポンスなし');
+    }
+
+    const status = response.status();
+    console.log('Mercari HTTP:', status);
+
+    if (status < 200 || status >= 400) {
+      throw new Error(`Mercari HTTP ${status}`);
+    }
+
+    await dismissMercariRegionGate_(page);
+    await page.waitForSelector('body', { timeout: PAGE_TIMEOUT_MS });
+    await page.waitForTimeout(2200);
+    await loadMercariListings_(page);
+
+    const rawItems = await extractMercariSoldItems_(
+      page,
+      MAX_MERCARI_SOLD_ITEMS
+    );
+    const comparable = filterComparableItems_(target, rawItems, 'Mercari売切');
+    mercariItems.push(...comparable);
+    marketStatus.mercariSucceeded = true;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    marketErrors.push(`Mercari売切: ${message}`);
+    console.error(`[${target.dbItemId}] Mercari売切取得失敗:`, message);
   }
 
-  const status = response.status();
-  console.log('Yahoo HTTP:', status);
+  try {
+    if (!yahooUrl) {
+      throw new Error('相場URL_Yahoo180 がありません');
+    }
 
-  if (status < 200 || status >= 400) {
-    throw new Error(`${target.dbItemId}: Yahoo HTTP ${status}`);
+    const response = await page.goto(
+      yahooUrl,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_TIMEOUT_MS
+      }
+    );
+
+    if (!response) {
+      throw new Error('Yahoo HTTPレスポンスなし');
+    }
+
+    const status = response.status();
+    console.log('Yahoo HTTP:', status);
+
+    if (status < 200 || status >= 400) {
+      throw new Error(`Yahoo HTTP ${status}`);
+    }
+
+    await page.waitForSelector('body', { timeout: PAGE_TIMEOUT_MS });
+    await page.waitForTimeout(2200);
+
+    const bodyText = String(
+      await page.locator('body').innerText()
+    ).replace(/\u00a0/g, ' ');
+
+    const looksLikeClosedSearch =
+      bodyText.includes('終了180日間') ||
+      bodyText.includes('180日間の落札相場') ||
+      bodyText.includes('落札相場');
+
+    if (!looksLikeClosedSearch) {
+      throw new Error('Yahoo落札相場ページとして確認できません');
+    }
+
+    const rawItems = await extractYahooClosedItems_(
+      page,
+      MAX_SOLD_ITEMS
+    );
+    const comparable = filterComparableItems_(target, rawItems, 'Yahoo落札');
+    yahooItems.push(...comparable);
+    marketStatus.yahooSucceeded = true;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    marketErrors.push(`Yahoo落札: ${message}`);
+    console.error(`[${target.dbItemId}] Yahoo落札取得失敗:`, message);
   }
 
-  await page.waitForSelector('body', { timeout: PAGE_TIMEOUT_MS });
-  await page.waitForTimeout(2200);
-
-  const bodyText = String(
-    await page.locator('body').innerText()
-  ).replace(/\u00a0/g, ' ');
-
-  const looksLikeClosedSearch =
-    bodyText.includes('終了180日間') ||
-    bodyText.includes('180日間の落札相場') ||
-    bodyText.includes('落札相場');
-
-  if (!looksLikeClosedSearch) {
+  if (!marketStatus.mercariSucceeded && !marketStatus.yahooSucceeded) {
     throw new Error(
-      `${target.dbItemId}: Yahoo落札相場ページとして確認できません`
+      `${target.dbItemId}: Mercari・Yahoo両市場の取得に失敗しました。${marketErrors.join(' / ')}`
     );
   }
 
-  const items = await extractYahooClosedItems_(
-    page,
-    MAX_SOLD_ITEMS
+  const summary = summarizeTwoMarkets_(
+    target,
+    mercariItems,
+    yahooItems,
+    marketStatus
   );
 
-  const summary = summarizeHistorical_(target, items);
-
   console.log('実売サンプル:', summary.sampleCount);
+  console.log('Mercari売切件数 / 中央値:', summary.mercariSoldCount, yen_(summary.mercariMedianPrice));
+  console.log('Yahoo落札件数 / 中央値:', summary.yahooSoldCount, yen_(summary.yahooMedianPrice));
+  console.log(
+    '市場間中央値差率:',
+    typeof summary.marketMedianGapRate === 'number'
+      ? `${(summary.marketMedianGapRate * 100).toFixed(1)}%`
+      : '—'
+  );
+  console.log('相場ソース判定:', summary.sourceJudgement);
   console.log('25%値:', yen_(summary.q25Price));
   console.log('中央値:', yen_(summary.medianPrice));
   console.log('75%値:', yen_(summary.q75Price));
   console.log('Historical Score:', summary.historicalScore);
   console.log('Historical判定:', summary.judgement);
+  console.log('Historical状態:', summary.state);
 
   await saveSummary_(target, summary);
+
+  if (marketErrors.length) {
+    throw new Error(
+      `${target.dbItemId}: 一部市場は失敗しましたが、取得できた市場のデータは保存済みです。${marketErrors.join(' / ')}`
+    );
+  }
 
   return summary;
 }
@@ -689,6 +1192,7 @@ async function main() {
   console.log('========================================');
   console.log('Historical Backfill START');
   console.log('Batch limit:', BATCH_LIMIT);
+  console.log('Max Mercari sold items:', MAX_MERCARI_SOLD_ITEMS);
   console.log('Max sold items:', MAX_SOLD_ITEMS);
   console.log('Force:', FORCE);
   console.log('Dry run:', DRY_RUN);
@@ -718,6 +1222,10 @@ async function main() {
   const context = await browser.newContext({
     locale: 'ja-JP',
     timezoneId: 'Asia/Tokyo',
+    userAgent:
+      'Mozilla/5.0 (X11; Linux x86_64) ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/140.0.0.0 Safari/537.36',
     viewport: {
       width: 1440,
       height: 1200
