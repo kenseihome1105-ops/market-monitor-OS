@@ -13,6 +13,14 @@ on:
         required: false
         type: string
         default: ""
+      auto_continue:
+        description: "Continue successful runs in 5-item batches until no targets remain"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 concurrency:
   group: market-monitor-os-production
@@ -20,6 +28,8 @@ concurrency:
 
 jobs:
   historical-backfill:
+    outputs:
+      has_more: ${{ steps.run-backfill.outputs.has_more }}
     runs-on: ubuntu-latest
 
     steps:
@@ -41,9 +51,36 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run historical backfill
+        id: run-backfill
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
           HISTORICAL_FORCE: ${{ inputs.force }}
           HISTORICAL_TARGET_DB_ITEM_ID: ${{ inputs.db_item_id }}
+          HISTORICAL_AUTO_CONTINUE: ${{ inputs.auto_continue }}
         run: node historical-backfill.js
+
+  continue-backfill:
+    needs: historical-backfill
+    if: >-
+      ${{ inputs.auto_continue && !inputs.force && inputs.db_item_id == '' &&
+          needs.historical-backfill.outputs.has_more == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+
+    steps:
+      - name: Pause before the next batch
+        run: sleep 180
+
+      - name: Dispatch the next batch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          curl --fail-with-body --silent --show-error
+          --request POST
+          --url "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/historical-backfill.yml/dispatches"
+          --header "Accept: application/vnd.github+json"
+          --header "Authorization: Bearer ${GH_TOKEN}"
+          --header "X-GitHub-Api-Version: 2022-11-28"
+          --data '{"ref":"main","inputs":{"force":"false","db_item_id":"","auto_continue":"true"}}'
