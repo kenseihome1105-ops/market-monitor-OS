@@ -636,6 +636,13 @@ function expandKnownFeaturePhrases_(value) {
   if (/(mouton|ムートン|sheepskin|shearling|シープスキン)/.test(normalized)) {
     phrases.push('ムートン', 'mouton', 'シープスキン', 'sheepskin', 'shearling');
   }
+  if (/(羊毛皮|羊毛付き)/.test(normalized)) {
+    phrases.push(
+      '羊毛皮', '羊毛付き',
+      'ムートン', 'mouton',
+      'シープスキン', 'sheepskin', 'shearling'
+    );
+  }
   if (/(london|ロンドン)/.test(normalized)) {
     phrases.push('LONDON', 'ロンドン');
   }
