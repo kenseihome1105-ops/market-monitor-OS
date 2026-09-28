@@ -717,6 +717,23 @@ function detectGender_(value) {
   return '';
 }
 
+function hasOuterwearCue_(value) {
+  const text = normalizeMatchText_(value);
+  return /ジャケット|コート|ブルゾン|ライダース|ジャンパー|アウター|フライト|パーカー|jacket|coat|blouson|riders|outerwear|parka|anorak|bomber|b3/.test(text);
+}
+
+function hasNonOuterwearCue_(value) {
+  const text = normalizeMatchText_(value);
+  return /手袋|グローブ|ミトン|靴下|ソックス|マフラー|ストール|スカーフ|帽子|ハット|キャップ|バッグ|かばん|財布|シューズ|ブーツ|スニーカー|glove|mitten|sock|scarf|muffler|stole|hat|cap|bag|wallet|shoe|boot/.test(text);
+}
+
+function isOuterwearTarget_(target) {
+  const descriptor = [target.product, target.masterProductName, target.category, target.masterSubCategory]
+    .filter(Boolean)
+    .join(' ');
+  return hasOuterwearCue_(descriptor);
+}
+
 function addRequiredFeature_(groups, name, alternatives) {
   const phrases = uniqueMatchPhrases_(alternatives);
 
@@ -864,6 +881,8 @@ function scoreHistoricalTitleMatch_(target, title) {
   const targetGender = detectGender_(`${target.category || ''} ${target.masterSubCategory || ''}`);
   const titleGender = detectGender_(title);
   const genderMismatch = Boolean(targetGender && titleGender && targetGender !== titleGender);
+  const outerwearTypeMismatch = isOuterwearTarget_(target)
+    && (!hasOuterwearCue_(title) || hasNonOuterwearCue_(title));
   const requiredFeatures = buildRequiredIdentityFeatures_(target);
   const missingFeatures = requiredFeatures.filter(feature =>
     !feature.alternatives.some(phrase => strictPhrasePresent_(title, phrase))
@@ -873,6 +892,7 @@ function scoreHistoricalTitleMatch_(target, title) {
   if (!identityMatch) reasons.push('ブランド・商品・カテゴリ不一致');
   if (score < 0.55) reasons.push('一致スコア55未満');
   if (genderMismatch) reasons.push('性別カテゴリ不一致');
+  if (outerwearTypeMismatch) reasons.push('商品種別不一致:アウター');
   for (const feature of missingFeatures) {
     reasons.push(`必須特徴不足:${feature.name}`);
   }
