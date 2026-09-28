@@ -69,6 +69,11 @@ const DRY_RUN =
     .trim()
     .toLowerCase() === 'true';
 
+const AUTO_CONTINUE =
+  String(process.env.HISTORICAL_AUTO_CONTINUE || '')
+    .trim()
+    .toLowerCase() === 'true';
+
 const APPS_SCRIPT_MAX_ATTEMPTS = 5;
 const APPS_SCRIPT_RETRY_DELAYS_MS = [
   0,
@@ -280,6 +285,37 @@ function selectHistoricalTargets_(targets, requestedDbItemId) {
 
   return available.filter(target =>
     String(target && target.dbItemId || '').trim() === requestedId
+  );
+}
+
+function shouldContinueHistoricalBackfill_(options = {}) {
+  const targetCount = Math.max(0, Number(options.targetCount) || 0);
+  const remaining = Math.max(0, Number(options.remaining) || 0);
+  const success = Math.max(0, Number(options.success) || 0);
+  const failed = Math.max(0, Number(options.failed) || 0);
+
+  return (
+    options.autoContinue === true &&
+    options.force !== true &&
+    !String(options.requestedDbItemId || '').trim() &&
+    targetCount > 0 &&
+    success === targetCount &&
+    failed === 0 &&
+    remaining > targetCount
+  );
+}
+
+function writeGitHubOutput_(name, value) {
+  const outputPath = String(process.env.GITHUB_OUTPUT || '').trim();
+
+  if (!outputPath) {
+    return;
+  }
+
+  require('node:fs').appendFileSync(
+    outputPath,
+    `${name}=${String(value)}\n`,
+    'utf8'
   );
 }
 
@@ -1609,6 +1645,7 @@ async function main() {
   console.log('Force:', FORCE);
   console.log('指定DB商品ID:', TARGET_DB_ITEM_ID || '(なし)');
   console.log('Dry run:', DRY_RUN);
+  console.log('Auto continue:', AUTO_CONTINUE);
   console.log('========================================');
 
   if (TARGET_DB_ITEM_ID && !FORCE) {
@@ -1642,6 +1679,7 @@ async function main() {
 
   if (!targets.length) {
     console.log('Historical Backfill: 対象なし');
+    writeGitHubOutput_('has_more', 'false');
     return;
   }
 
@@ -1717,6 +1755,19 @@ async function main() {
     console.log('失敗一覧:', JSON.stringify(errors, null, 2));
   }
 
+  const hasMore = shouldContinueHistoricalBackfill_({
+    autoContinue: AUTO_CONTINUE,
+    force: FORCE,
+    requestedDbItemId: TARGET_DB_ITEM_ID,
+    remaining: Number(targetResult.remaining || 0),
+    targetCount: targets.length,
+    success,
+    failed
+  });
+
+  writeGitHubOutput_('has_more', hasMore ? 'true' : 'false');
+  console.log('自動継続:', hasMore ? '次バッチあり' : '停止');
+
   console.log('========================================');
 
   // 一部失敗でも成功分は保存済み。
@@ -1730,7 +1781,8 @@ module.exports = {
   buildRequiredIdentityFeatures_,
   filterComparableItems_,
   scoreHistoricalTitleMatch_,
-  selectHistoricalTargets_
+  selectHistoricalTargets_,
+  shouldContinueHistoricalBackfill_
 };
 
 if (require.main === module) {
