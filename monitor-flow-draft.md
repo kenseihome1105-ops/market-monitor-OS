@@ -17,6 +17,11 @@ the live spreadsheet.
   advances only after the ledger ingest succeeds. An exhausted result resets
   to the top for the next pass. Mercari stops without advancing if it cannot
   load the requested range before its scroll safety limit.
+- The saved position is numeric. If the marketplace inserts or removes results
+  ahead of that position, the page can shift. Ledger dedupe suppresses repeat
+  ingest, and the next pass starts at the top again, but this draft cannot
+  guarantee zero omissions during a changing feed. An item that disappears
+  before the crawler reaches it cannot be recovered from the active listing.
 - Yahoo uses the existing search URL's order and paginates with `b`/`n`. The
   current Backfill URL builder uses `s1=end&o1=a`, which sorts by auction end
   time rather than newly listed time. Therefore the Yahoo portion still needs
