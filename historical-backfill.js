@@ -1770,10 +1770,9 @@ async function main() {
 
   console.log('========================================');
 
-  // 一部失敗でも成功分は保存済み。
-  // 全件失敗した時だけWorkflowを赤にする。
-  if (success === 0 && failed > 0) {
-    throw new Error('Historical Backfill が全件失敗しました');
+  // 成功分は保存済み。失敗があれば自動継続せず、Workflowを赤にして再確認できるようにする。
+  if (failed > 0) {
+    throw new Error(`Historical Backfill が${failed}件失敗しました`);
   }
 }
 
