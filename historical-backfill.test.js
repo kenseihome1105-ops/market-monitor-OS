@@ -1,7 +1,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { scoreHistoricalTitleMatch_ } = require('./historical-backfill');
+const {
+  scoreHistoricalTitleMatch_,
+  selectHistoricalTargets_
+} = require('./historical-backfill');
 
 const balmainRareLeather = {
   brand: 'BALMAIN',
@@ -130,4 +133,18 @@ test('必須モデル指定がない通常商品は従来どおり照合でき�
   );
 
   assert.equal(result.accepted, true);
+});
+
+test('指定DB商品IDがある場合は完全一致する対象だけを選ぶ', () => {
+  const targets = [
+    { dbItemId: '06OUTR-051', brand: 'Balmain' },
+    { dbItemId: '06OUTR-052', brand: 'Balmain' }
+  ];
+
+  assert.deepEqual(
+    selectHistoricalTargets_(targets, '06OUTR-051'),
+    [{ dbItemId: '06OUTR-051', brand: 'Balmain' }]
+  );
+  assert.deepEqual(selectHistoricalTargets_(targets, ' missing '), []);
+  assert.deepEqual(selectHistoricalTargets_(targets, ''), targets);
 });
