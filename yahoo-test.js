@@ -25,7 +25,8 @@ function sleep(ms) {
 // HTML / 非JSON / 404 / 5xx / 通信エラーを返した場合でも、
 // 監視全体を即終了させず、新しいPOSTで最大5回まで再試行する。
 //
-// ※ unauthorized / invalid market 等の正常なJSONエラーは再試行しない。
+// ※ unauthorized / invalid market 等の通常のJSONエラーは再試行しない。
+//    Apps Scriptのwrite lock競合(busy)のみ一時エラーとして再試行する。
 // ============================================================
 
 const APPS_SCRIPT_MAX_ATTEMPTS = 5;
@@ -181,9 +182,20 @@ async function postAppsScriptJson_(payload, label) {
     }
 
     if (result.ok !== true) {
-      throw new Error(
-        `${label}側エラー: ${JSON.stringify(result)}`
-      );
+      const errorText = JSON.stringify(result);
+      lastError = new Error(`${label}側エラー: ${errorText}`);
+
+      if (
+        result.error === 'busy' &&
+        attempt < APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+        console.warn(
+          `[${label}] Apps Scriptのwrite lock競合を一時エラーとして再試行します`
+        );
+        continue;
+      }
+
+      throw lastError;
     }
 
     return result;
