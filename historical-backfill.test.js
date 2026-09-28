@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 
 const {
   scoreHistoricalTitleMatch_,
-  selectHistoricalTargets_
+  selectHistoricalTargets_,
+  shouldContinueHistoricalBackfill_
 } = require('./historical-backfill');
 
 const balmainRareLeather = {
@@ -265,4 +266,79 @@ test('指定DB商品IDがある場合は完全一致する対象だけを選ぶ'
   );
   assert.deepEqual(selectHistoricalTargets_(targets, ' missing '), []);
   assert.deepEqual(selectHistoricalTargets_(targets, ''), targets);
+});
+
+test('自動継続は全件成功し、未処理対象が残るときだけ有効になる', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    force: false,
+    requestedDbItemId: '',
+    remaining: 12,
+    targetCount: 5,
+    success: 5,
+    failed: 0
+  }), true);
+});
+
+test('対象が最後のバッチだけなら自動継続しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    remaining: 5,
+    targetCount: 5,
+    success: 5,
+    failed: 0
+  }), false);
+});
+
+test('対象なしなら自動継続しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    remaining: 0,
+    targetCount: 0,
+    success: 0,
+    failed: 0
+  }), false);
+});
+
+test('1件でも失敗したバッチは自動継続しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    remaining: 12,
+    targetCount: 5,
+    success: 4,
+    failed: 1
+  }), false);
+});
+
+test('force再処理は自動継続しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    force: true,
+    remaining: 12,
+    targetCount: 5,
+    success: 5,
+    failed: 0
+  }), false);
+});
+
+test('商品IDを指定した単体再処理は自動継続しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: true,
+    force: true,
+    requestedDbItemId: '06OUTR-051',
+    remaining: 12,
+    targetCount: 1,
+    success: 1,
+    failed: 0
+  }), false);
+});
+
+test('自動継続を明示的に無効にした場合は次バッチを起動しない', () => {
+  assert.equal(shouldContinueHistoricalBackfill_({
+    autoContinue: false,
+    remaining: 12,
+    targetCount: 5,
+    success: 5,
+    failed: 0
+  }), false);
 });
