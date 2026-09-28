@@ -45,7 +45,7 @@ mock-sheet test:
 node --test private-appscript/market-ingest-cursor.test.js
 ```
 
-Do not enable this draft in production until the Yahoo sort and the projected
-workflow duration have been checked against the actual enabled-condition
-count. The current monitor workflows still process all enabled conditions
-sequentially.
+Before production, measure the actual enabled-condition count and projected
+workflow duration; the current monitor workflows process all enabled
+conditions sequentially. Also account for the offset cursor shifting when
+active listings disappear during a sweep, as described above.
