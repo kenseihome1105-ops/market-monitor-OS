@@ -61,7 +61,7 @@ test('羊毛皮の高値要素はムートン表記と照合し、通常の羊�
 
   assert.equal(moutonTitle.accepted, true, JSON.stringify(moutonTitle));
   assert.equal(genericLeatherTitle.accepted, false);
-  assert.ok(genericLeatherTitle.reasons.some(reason => reason.includes('高値要素:羊毛皮・冬物')));
+  assert.ok(genericLeatherTitle.reasons.some(reason => reason.includes('高値要素:羊毛皮')));
 });
 
 test('ムートン特徴が一致しても、ジャケット/コート対象では手袋を除外する', () => {
@@ -141,6 +141,105 @@ test('ラインに指定された2B・ロング・ダブルをそれぞれ必須
   );
   assert.equal(
     scoreHistoricalTitleMatch_(longDoubleTarget, 'HERMES メンズ ロング シングル チェスターコート').accepted,
+    false
+  );
+});
+
+test('高値要素のスラッシュは候補のいずれかに一致すればよい', () => {
+  const target = {
+    brand: 'Tom Ford',
+    category: 'メンズスーツ',
+    product: 'ビジネススーツ',
+    lineModel: 'ブランド生地',
+    highValue: 'DORMEUIL / Loro Piana / Zegna 生地'
+  };
+  const zegnaTitle = 'TOM FORD トムフォード メンズ Ermenegildo Zegna ゼニア生地 ウール100% ビジネススーツ';
+  const noFabricBrandTitle = 'TOM FORD トムフォード メンズ ウール100% ビジネススーツ';
+
+  assert.equal(scoreHistoricalTitleMatch_(target, zegnaTitle).accepted, true, JSON.stringify(scoreHistoricalTitleMatch_(target, zegnaTitle)));
+  assert.equal(scoreHistoricalTitleMatch_(target, noFabricBrandTitle).accepted, false);
+});
+
+test('高値要素は中黒区切りをすべて満たし、素材のスラッシュ候補はどちらかでよい', () => {
+  const target = {
+    brand: 'Loro Piana',
+    category: 'コート',
+    product: 'チェスターコート',
+    lineModel: 'ロング ダブル',
+    highValue: 'ロング・ダブル・ウール/カシミヤ'
+  };
+  const cashmereTitle = 'ロロピアーナ メンズ ロング ダブル カシミヤ100% チェスターコート';
+  const woolTitle = 'ロロピアーナ メンズ ロング ダブル ウール100% チェスターコート';
+  const missingDoubleTitle = 'ロロピアーナ メンズ ロング シングル カシミヤ100% チェスターコート';
+  const missingMaterialTitle = 'ロロピアーナ メンズ ロング ダブル チェスターコート';
+
+  assert.equal(scoreHistoricalTitleMatch_(target, cashmereTitle).accepted, true, JSON.stringify(scoreHistoricalTitleMatch_(target, cashmereTitle)));
+  assert.equal(scoreHistoricalTitleMatch_(target, woolTitle).accepted, true, JSON.stringify(scoreHistoricalTitleMatch_(target, woolTitle)));
+  assert.equal(scoreHistoricalTitleMatch_(target, missingDoubleTitle).accepted, false);
+  assert.equal(scoreHistoricalTitleMatch_(target, missingMaterialTitle).accepted, false);
+});
+
+test('日本語ブランド名だけで出品された候補も照合する', () => {
+  const loroTarget = {
+    brand: 'Loro Piana',
+    category: 'コート',
+    product: 'チェスターコート',
+    lineModel: 'ロング ダブル',
+    highValue: 'ロング・ダブル・ウール/カシミヤ'
+  };
+  const brunelloTarget = {
+    brand: 'Brunello Cucinelli',
+    category: 'コート',
+    product: 'チェスターコート',
+    lineModel: 'ロング ダブル',
+    highValue: 'ロング・ダブル・ウール/カシミヤ'
+  };
+
+  assert.equal(
+    scoreHistoricalTitleMatch_(loroTarget, 'ロロピアーナ カシミヤ100% ダブルブレスト ロングコート 黒 44').accepted,
+    true
+  );
+  assert.equal(
+    scoreHistoricalTitleMatch_(brunelloTarget, 'ブルネロクチネリ カシミヤ100% チェスターコート ロング ダブル 紺 52').accepted,
+    true
+  );
+});
+
+test('スリーピース表記を3ピースと同じモデルとして照合し、高値3条件を維持する', () => {
+  const target = {
+    brand: 'Tom Ford',
+    category: 'メンズスーツ',
+    product: '3ピーススーツ',
+    lineModel: 'スリーピース',
+    highValue: 'ベスト付3点・濃色・ウール100%'
+  };
+  const validTitle = 'TOM FORD トムフォード メンズ 3ピーススーツ ベスト付き ウール100% ネイビー';
+  const missingColorTitle = 'TOM FORD トムフォード メンズ スリーピーススーツ ベスト付き ウール100%';
+  const missingWoolPercentageTitle = 'TOM FORD トムフォード メンズ three-piece suit vest dark navy wool blend';
+
+  assert.equal(scoreHistoricalTitleMatch_(target, validTitle).accepted, true, JSON.stringify(scoreHistoricalTitleMatch_(target, validTitle)));
+  assert.equal(scoreHistoricalTitleMatch_(target, missingColorTitle).accepted, false);
+  assert.equal(scoreHistoricalTitleMatch_(target, missingWoolPercentageTitle).accepted, false);
+});
+
+test('カシミヤ100%指定では混紡表記だけの候補を採用しない', () => {
+  const target = {
+    brand: 'Tom Ford',
+    category: 'ニット',
+    product: 'セーター',
+    highValue: 'カシミヤ100%'
+  };
+
+  assert.equal(
+    scoreHistoricalTitleMatch_(target, 'TOM FORD カシミヤ100% セーター').accepted,
+    true
+  );
+  assert.equal(
+    scoreHistoricalTitleMatch_(target, 'TOM FORD 100% cashmere セーター').accepted,
+    true
+  );
+  assert.equal(
+    scoreHistoricalTitleMatch_(target, 'TOM FORD カシミヤ混 セーター').accepted,
     false
   );
 });
