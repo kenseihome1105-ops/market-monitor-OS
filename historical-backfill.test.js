@@ -64,6 +64,25 @@ test('羊毛皮の高値要素はムートン表記と照合し、通常の羊�
   assert.ok(genericLeatherTitle.reasons.some(reason => reason.includes('高値要素:羊毛皮・冬物')));
 });
 
+test('ムートン特徴が一致しても、ジャケット/コート対象では手袋を除外する', () => {
+  const target = {
+    brand: 'BALMAIN',
+    category: 'その他アウター',
+    product: 'ムートンジャケット/コート',
+    lineModel: 'ムートン',
+    highValue: '羊毛皮・冬物'
+  };
+
+  const gloveTitle = '美品 BALMAIN バルマン ニット×ムートン コンビ ロンググローブ 手袋 レディース';
+  const jacketTitle = '超美品 バルマン BALMAIN ラムレザー ムートンコート';
+  const glove = scoreHistoricalTitleMatch_(target, gloveTitle);
+  const jacket = scoreHistoricalTitleMatch_(target, jacketTitle);
+
+  assert.equal(glove.accepted, false, JSON.stringify(glove));
+  assert.ok(glove.reasons.includes('商品種別不一致:アウター'));
+  assert.equal(jacket.accepted, true, JSON.stringify(jacket));
+});
+
 test('Burberry London指定では通常のBurberryスーツを除外する', () => {
   const genericTitle = scoreHistoricalTitleMatch_(
     burberryLondonSuit,
