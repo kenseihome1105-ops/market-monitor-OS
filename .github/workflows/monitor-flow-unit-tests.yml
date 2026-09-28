@@ -1,0 +1,26 @@
+name: Monitor flow unit tests
+
+on:
+  push:
+    branches:
+      - codex/backfill-to-monitor-cursor
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run unit tests
+        run: npm test
+      - name: Check JavaScript syntax
+        run: |
+          node --check monitor.js
+          node --check yahoo-test.js
+          node --check historical-backfill.js

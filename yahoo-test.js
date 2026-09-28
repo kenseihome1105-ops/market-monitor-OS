@@ -1,4 +1,8 @@
 const { chromium } = require('playwright');
+const {
+  defaultScanOffset_,
+  buildYahooScanUrl_
+} = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
 const MARKET_INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
@@ -233,6 +237,20 @@ async function sendToAppsScript(items, conditionId) {
   );
 }
 
+async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId) {
+  return postAppsScriptJson_(
+    {
+      secret: MARKET_INGEST_SECRET,
+      action: 'ackMarketScanCursor',
+      market: MARKET,
+      conditionId,
+      nextOffset,
+      lastItemId: String(lastItemId || '')
+    },
+    `Scan cursor ${conditionId}`
+  );
+}
+
 
 // ============================================================
 // 市場監視設定取得
@@ -335,7 +353,12 @@ async function getYahooConfigs() {
 
 
     validConfigs.push(
-      config
+      {
+        ...config,
+        scanOffset: Number.isInteger(Number(config.scanOffset))
+          ? Math.max(1, Number(config.scanOffset))
+          : defaultScanOffset_(MARKET)
+      }
     );
 
 
@@ -399,6 +422,15 @@ async function scanYahooSearch(
   const searchUrl =
     config.searchUrl;
 
+  const scanOffset = Number.isInteger(Number(config.scanOffset))
+    ? Math.max(1, Number(config.scanOffset))
+    : defaultScanOffset_(MARKET);
+  const pagedSearchUrl = buildYahooScanUrl_(
+    searchUrl,
+    scanOffset,
+    MAX_SEARCH_ITEMS
+  );
+
 
   console.log(
     '=============================='
@@ -434,7 +466,7 @@ async function scanYahooSearch(
       if (attempt === 1) {
 
         await page.goto(
-          searchUrl,
+          pagedSearchUrl,
           {
             waitUntil: 'domcontentloaded',
             timeout: 60000
@@ -509,9 +541,14 @@ async function scanYahooSearch(
   }
 
 
+  const configuredMaxBuyPrice = Number(config.normalBuyLimit);
+  const maxBuyPrice = Number.isFinite(configuredMaxBuyPrice) && configuredMaxBuyPrice > 0
+    ? configuredMaxBuyPrice
+    : 29000;
+
   const items =
     await page.evaluate(
-      (MAX_SEARCH_ITEMS) => {
+      ({ MAX_SEARCH_ITEMS, maxBuyPrice }) => {
 
         function cleanText(text) {
 
@@ -832,7 +869,7 @@ async function scanYahooSearch(
           if (
             !price ||
             price <= 0 ||
-            price > 29000
+            price > maxBuyPrice
           ) {
             continue;
           }
@@ -879,7 +916,7 @@ async function scanYahooSearch(
 
       },
 
-      MAX_SEARCH_ITEMS
+      { MAX_SEARCH_ITEMS, maxBuyPrice }
     );
 
 
@@ -1963,6 +2000,11 @@ async function main() {
       );
 
 
+      const scanOffset = Number.isInteger(Number(config.scanOffset))
+        ? Math.max(1, Number(config.scanOffset))
+        : defaultScanOffset_(MARKET);
+
+
       const searchItems =
         await scanYahooSearch(
           searchPage,
@@ -1989,6 +2031,17 @@ async function main() {
           searchItems,
           config.conditionId
         );
+
+      const nextOffset = searchItems.length
+        ? scanOffset + searchItems.length
+        : defaultScanOffset_(MARKET);
+      await acknowledgeMarketScanCursor_(
+        config.conditionId,
+        nextOffset,
+        searchItems.length
+          ? searchItems[searchItems.length - 1].itemId
+          : ''
+      );
 
 
       console.log(

@@ -275,6 +275,82 @@ async function getTargets_() {
   );
 }
 
+function buildBackfillMonitorConditions_(targets) {
+  const registrations = [];
+  const seen = new Set();
+
+  for (const target of Array.isArray(targets) ? targets : []) {
+    const dbItemId = String(target && target.dbItemId || '').trim();
+    if (!dbItemId) continue;
+
+    const searchName = [target.brand, target.product || target.searchKeyword]
+      .map(value => String(value || '').trim())
+      .filter(Boolean)
+      .join(' ')
+      .slice(0, 120) || dbItemId;
+    const encodedId = encodeURIComponent(dbItemId);
+
+    for (const entry of [
+      ['メルカリ', 'M', target.mercariBuyUrl],
+      ['ヤフオク', 'Y', target.yahooBuyUrl]
+    ]) {
+      const [market, code, rawUrl] = entry;
+      let url;
+      try {
+        url = new URL(String(rawUrl || '').trim());
+      } catch (error) {
+        continue;
+      }
+
+      const validUrl = market === 'メルカリ'
+        ? url.origin === 'https://jp.mercari.com' && url.pathname === '/search'
+        : url.origin === 'https://auctions.yahoo.co.jp' && url.pathname === '/search/search';
+      if (!validUrl) continue;
+
+      const conditionId = `BF_${code}_${encodedId}`;
+      if (seen.has(conditionId)) continue;
+      seen.add(conditionId);
+
+      registrations.push({
+        conditionId,
+        market,
+        dbItemId,
+        searchName,
+        searchUrl: url.toString(),
+        intervalMinutes: 30,
+        normalBuyLimit: Number(target.normalBuyLimit) || 0
+      });
+    }
+  }
+
+  return registrations;
+}
+
+async function registerBackfillMonitorConditions_(targets) {
+  const conditions = buildBackfillMonitorConditions_(targets);
+  if (!conditions.length) {
+    console.log('監視条件登録: 有効な仕入検索URLがないため対象なし');
+    return { ok: true, count: 0 };
+  }
+
+  if (DRY_RUN) {
+    console.log('[DRY RUN] 監視条件登録をスキップ:', conditions.length);
+    return { ok: true, dryRun: true, count: conditions.length };
+  }
+
+  const result = await postAppsScriptJson_(
+    {
+      secret: INGEST_SECRET,
+      action: 'registerBackfillMonitorConditions',
+      conditions
+    },
+    'Register Backfill monitor conditions'
+  );
+
+  console.log('監視条件登録結果:', JSON.stringify(result));
+  return result;
+}
+
 function selectHistoricalTargets_(targets, requestedDbItemId) {
   const available = Array.isArray(targets) ? targets : [];
   const requestedId = String(requestedDbItemId || '').trim();
@@ -1683,6 +1759,10 @@ async function main() {
     return;
   }
 
+  // Backfillで得た仕入条件は、成約データ取得より先に監視設定へ登録する。
+  // 登録は同一DB商品ID・市場ごとに冪等で、DRY_RUNでは書き込まない。
+  await registerBackfillMonitorConditions_(targets);
+
   const browser = await chromium.launch({
     headless: true,
     args: [
@@ -1777,6 +1857,7 @@ async function main() {
 }
 
 module.exports = {
+  buildBackfillMonitorConditions_,
   buildRequiredIdentityFeatures_,
   filterComparableItems_,
   scoreHistoricalTitleMatch_,

@@ -1,4 +1,8 @@
 const { chromium } = require('playwright');
+const {
+  defaultScanOffset_,
+  selectOffsetBatch_
+} = require('./market-scan-cursor');
 
 
 // ============================================================
@@ -549,7 +553,12 @@ async function getMercariConfigs() {
 
 
     validConfigs.push(
-      config
+      {
+        ...config,
+        scanOffset: Number.isInteger(Number(config.scanOffset))
+          ? Math.max(0, Number(config.scanOffset))
+          : defaultScanOffset_(MARKET)
+      }
     );
 
 
@@ -757,31 +766,59 @@ async function dismissRegionGate(
 // ============================================================
 
 async function loadListings(
-  page
+  page,
+  targetCount
 ) {
 
-  for (
-    let i = 0;
-    i < 6;
-    i++
-  ) {
+  const MIN_SCROLLS = 6;
+  const MAX_SCROLLS = 180;
+  let scrolls = 0;
+  let stableAtBottom = 0;
+  let reachedBottom = false;
+  let loadedCount = 0;
 
-    await page.evaluate(
-      () => {
+  while (scrolls < MAX_SCROLLS) {
+    const before = await page.evaluate(() => ({
+      count: document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      ).length,
+      y: window.scrollY,
+      height: document.documentElement.scrollHeight,
+      viewport: window.innerHeight
+    }));
 
-        window.scrollBy(
-          0,
-          window.innerHeight * 1.5
-        );
+    loadedCount = before.count;
+    if (scrolls >= MIN_SCROLLS && loadedCount >= targetCount) break;
 
-      }
-    );
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 1.5);
+    });
+    await page.waitForTimeout(500);
+    scrolls++;
 
+    const after = await page.evaluate(() => ({
+      count: document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      ).length,
+      y: window.scrollY,
+      height: document.documentElement.scrollHeight,
+      viewport: window.innerHeight
+    }));
+    loadedCount = after.count;
 
-    await page.waitForTimeout(
-      700
-    );
+    if (scrolls >= MIN_SCROLLS && loadedCount >= targetCount) break;
 
+    const atBottom = after.y + after.viewport >= after.height - 20;
+    if (atBottom && after.count <= before.count) {
+      stableAtBottom++;
+    } else {
+      stableAtBottom = 0;
+    }
+
+    if (stableAtBottom >= 3) {
+      reachedBottom = true;
+      break;
+    }
   }
 
 
@@ -795,6 +832,14 @@ async function loadListings(
 
     }
   );
+
+  if (loadedCount < targetCount && !reachedBottom) {
+    throw new Error(
+      `Mercariの続き位置まで読み込めませんでした: ${loadedCount}/${targetCount}件`
+    );
+  }
+
+  return { loadedCount, reachedBottom };
 
 }
 
@@ -1143,10 +1188,6 @@ async function extractMercariItems(
   return Array
     .from(
       map.values()
-    )
-    .slice(
-      0,
-      maxItems
     );
 
 }
@@ -1181,6 +1222,20 @@ async function sendToAppsScript(
     `Ingest ${conditionId}`
   );
 
+}
+
+async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId) {
+  return postAppsScriptJson(
+    {
+      secret: INGEST_SECRET,
+      action: 'ackMarketScanCursor',
+      market: MARKET,
+      conditionId,
+      nextOffset,
+      lastItemId: String(lastItemId || '')
+    },
+    `Scan cursor ${conditionId}`
+  );
 }
 
 
@@ -3024,16 +3079,29 @@ async function scanMercariCondition(
   );
 
 
+  const scanOffset = Number.isInteger(Number(config.scanOffset))
+    ? Math.max(0, Number(config.scanOffset))
+    : defaultScanOffset_(MARKET);
+
   await loadListings(
-    page
+    page,
+    scanOffset + MAX_SEARCH_ITEMS
   );
 
 
-  const items =
+  const allItems =
     await extractMercariItems(
       page,
-      MAX_SEARCH_ITEMS
+      Number.MAX_SAFE_INTEGER
     );
+
+  const batch = selectOffsetBatch_(
+    allItems,
+    scanOffset,
+    MAX_SEARCH_ITEMS
+  );
+
+  const items = batch.items;
 
 
   console.log(
@@ -3056,9 +3124,20 @@ async function scanMercariCondition(
   }
 
 
-  if (
-    items.length === 0
-  ) {
+  if (!items.length && scanOffset > 0) {
+    await acknowledgeMarketScanCursor_(
+      config.conditionId,
+      defaultScanOffset_(MARKET),
+      ''
+    );
+    console.log(
+      'Mercari末尾まで走査済み。次回は先頭から再走査します:',
+      config.conditionId
+    );
+    return { received: 0, inserted: 0, updated: 0, insertedItems: [] };
+  }
+
+  if (items.length === 0) {
 
     throw new Error(
       config.conditionId +
@@ -3073,6 +3152,12 @@ async function scanMercariCondition(
       items,
       config.conditionId
     );
+
+  await acknowledgeMarketScanCursor_(
+    config.conditionId,
+    scanOffset + items.length,
+    items[items.length - 1].itemId
+  );
 
 
   console.log(
