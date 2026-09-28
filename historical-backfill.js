@@ -602,7 +602,10 @@ function brandMatchPhrases_(value) {
   const equivalences = [
     { keys: ['burberry', 'バーバリー'], values: ['BURBERRY', 'バーバリー'] },
     { keys: ['balmain', 'バルマン'], values: ['BALMAIN', 'バルマン'] },
-    { keys: ['hermes', 'エルメス'], values: ['HERMES', 'エルメス'] }
+    { keys: ['hermes', 'エルメス'], values: ['HERMES', 'エルメス'] },
+    { keys: ['tomford', 'トムフォード'], values: ['TOM FORD', 'トムフォード', 'トム・フォード'] },
+    { keys: ['loropiana', 'ロロピアーナ'], values: ['Loro Piana', 'ロロピアーナ'] },
+    { keys: ['brunellocucinelli', 'ブルネロクチネリ'], values: ['Brunello Cucinelli', 'ブルネロクチネリ'] }
   ];
 
   for (const entry of equivalences) {
@@ -627,7 +630,13 @@ function strictPhrasePresent_(title, phrase) {
 
   // Avoid accepting English feature words inside unrelated longer words.
   if (/^[a-z0-9]+$/i.test(String(phrase || '').trim())) {
-    const escaped = normalizedPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const phraseParts = String(phrase || '')
+      .normalize('NFKC')
+      .toLocaleLowerCase('ja-JP')
+      .match(/[a-z0-9]+/g) || [];
+    const escaped = phraseParts
+      .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('[\\s_%-]*');
     return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(rawTitle);
   }
 
@@ -649,7 +658,50 @@ function expandKnownFeaturePhrases_(value) {
     phrases.push('水牛革', 'バッファロー', 'buffalo', 'buffalo leather');
   }
   if (/(cashmere|カシミヤ|カシミア)/.test(normalized)) {
-    phrases.push('カシミヤ', 'カシミア', 'cashmere');
+    if (/100/.test(normalized)) {
+      phrases.push(
+        'カシミヤ100%', 'カシミア100%', 'cashmere100%',
+        'cashmere 100%', '100% cashmere'
+      );
+    } else {
+      phrases.push('カシミヤ', 'カシミア', 'cashmere');
+    }
+  }
+  if (/(wool|ウール|羊毛)/.test(normalized)) {
+    if (/100/.test(normalized)) {
+      phrases.push(
+        'ウール100%', '羊毛100%', '毛100%',
+        'wool100%', 'wool 100%', '100% wool'
+      );
+    } else {
+      phrases.push('ウール', '羊毛', 'wool');
+    }
+  }
+  if (/(濃色|darkcolor|darkshade)/.test(normalized)) {
+    phrases.push(
+      '黒', 'ブラック', 'black',
+      'ネイビー', '濃紺', 'navy',
+      '濃灰', 'チャコール', 'チャコールグレー',
+      'ダークグレー', 'dark gray', 'dark grey',
+      'ダークネイビー', 'dark navy',
+      'ダークブラウン', 'dark brown'
+    );
+  }
+  if (/(ベスト付3点|ベスト付き3点|スリーピース|3ピース|threepiece|3piece)/.test(normalized)) {
+    phrases.push(
+      '3ピース', 'スリーピース',
+      'three piece', 'three-piece', 'threepiece',
+      '3 piece', '3-piece', '3piece'
+    );
+  }
+  if (/(dormeuil|ドーメル)/.test(normalized)) {
+    phrases.push('DORMEUIL', 'ドーメル');
+  }
+  if (/(loropiana|ロロピアーナ)/.test(normalized)) {
+    phrases.push('Loro Piana', 'ロロピアーナ');
+  }
+  if (/(zegna|ゼニア)/.test(normalized)) {
+    phrases.push('Zegna', 'Ermenegildo Zegna', 'ゼニア');
   }
   if (/(mouton|ムートン|sheepskin|shearling|シープスキン)/.test(normalized)) {
     phrases.push('ムートン', 'mouton', 'シープスキン', 'sheepskin', 'shearling');
@@ -697,12 +749,36 @@ const MODEL_CUES_ = [
     alternatives: ['ダブル', 'double', 'doublebreasted']
   },
   {
+    id: 'ライン/モデル:3ピース',
+    pattern: /3ピース|スリーピース|threepiece|3piece/,
+    remove: ['3ピース', 'スリーピース', 'threepiece', '3piece'],
+    alternatives: [
+      '3ピース', 'スリーピース',
+      'three piece', 'three-piece', 'threepiece',
+      '3 piece', '3-piece', '3piece'
+    ]
+  },
+  {
+    id: 'ライン/モデル:ブランド生地',
+    pattern: /ブランド生地/,
+    remove: ['ブランド生地'],
+    alternatives: []
+  },
+  {
     id: 'ライン/モデル:ムートン',
     pattern: /ムートン|mouton|sheepskin|shearling/,
     remove: ['ムートン', 'mouton', 'sheepskin', 'shearling'],
     alternatives: ['ムートン', 'mouton', 'シープスキン', 'sheepskin', 'shearling']
   }
 ];
+
+function splitHighValueRequirements_(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .split(/[・･]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
 
 function detectGender_(value) {
   const text = String(value || '').normalize('NFKC').toLocaleLowerCase('ja-JP');
@@ -781,16 +857,17 @@ function buildRequiredIdentityFeatures_(target) {
     }
   }
 
-  const genericHighValue = /^(高値|希少|希少革|希少素材|レア|レアレザー|限定|人気|定番|プレミア)$/;
+  const genericHighValue = /^(高値|希少|希少革|希少素材|レア|レアレザー|限定|人気|定番|プレミア|冬物|秋冬|春夏|秋物|夏物)$/;
   if (highValueText && !rareLeather) {
-    for (const value of splitMatchAlternatives_(highValueText)) {
+    for (const value of splitHighValueRequirements_(highValueText)) {
       const normalized = normalizeMatchText_(value);
 
       if (!normalized || genericHighValue.test(normalized)) {
         continue;
       }
 
-      const known = expandKnownFeaturePhrases_(value);
+      const known = splitMatchAlternatives_(value)
+        .flatMap(expandKnownFeaturePhrases_);
       addRequiredFeature_(groups, `高値要素:${value}`, known);
     }
   }
