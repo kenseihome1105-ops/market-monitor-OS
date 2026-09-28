@@ -2,6 +2,12 @@ name: Historical Backfill
 
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Reprocess the top five candidates, including completed items"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: market-monitor-os-production
@@ -33,4 +39,5 @@ jobs:
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+          HISTORICAL_FORCE: ${{ inputs.force }}
         run: node historical-backfill.js
