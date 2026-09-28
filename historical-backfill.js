@@ -1,9261 +1,1596 @@
-const MARKET_INGEST = {
-
-
-
-  SPREADSHEET_ID:
-
-
-
-    '1ESxTivWg9JsLCOy4LQrmdk3o2YIGIfqpW0K6djWDDKc',
-
-
-
-
-
-
-
-  SHEET_NAME:
-
-
-
-    '市場監視台帳',
-
-
-
-
-
-
-
-  CONFIG_SHEET_NAME:
-
-
-
-    '市場監視設定',
-
-
-
-
-
-
-
-  MARKET_COMPS_SHEET_NAME:
-
-
-
-    '相場比較データ',
-
-
-
-
-
-
-
-  MASTER_SHEET_NAME:
-
-
-
-    '商品マスター',
-
-
-
-
-
-
-
-
-
-  HISTORICAL_SHEET_NAME:
-
-
-
-    '利益商品探索AI',
-  MARKET_COMPS_COLUMN_COUNT:
-
-
-
-    43,
-
-
-
-
-
-
-
-  SECRET_PROP:
-
-
-
-    'MARKET_INGEST_SECRET'
-
-
-
-};
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// 初回のみ
-
-
-
-//
-
-
-
-// ※ 既にSecretはGitHubと接続済み。
-
-
-
-// ※ 今回は絶対に実行しない。
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function setupMarketIngestSecret() {
-
-
-
-
-
-
-
-  const secret =
-
-
-
-    Utilities.getUuid().replace(/-/g, '') +
-
-
-
-    Utilities.getUuid().replace(/-/g, '');
-
-
-
-
-
-
-
-  PropertiesService
-
-
-
-    .getScriptProperties()
-
-
-
-    .setProperty(
-
-
-
-      MARKET_INGEST.SECRET_PROP,
-
-
-
-      secret
-
-
-
-    );
-
-
-
-
-
-
-
-  console.log(
-
-
-
-    'MARKET_INGEST_SECRET=' + secret
-
-
-
-  );
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// GitHub → market-ingest
-
-
-
-//
-
-
-
-// 3つの用途を同じmarket-ingestハンドラで処理
-
-
-
-//
-
-
-
-// ① action = getConfig
-
-
-
-//    市場監視設定のON条件を取得
-
-
-
-//
-
-
-
-// ② action = upsertMarketComps
-
-
-
-//    Yahoo / Mercari 等の類似成約データを
-
-
-
-//    「相場比較データ」へ安全にupsert
-
-
-
-//
-
-
-
-// ③ actionなし
-
-
-
-//    従来どおり市場監視台帳へ商品をupsert
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function marketIngestDoPostOS_(e) {
-
-
-
-
-
-
-
-  let lock = null;
-
-
-
-  let lockAcquired = false;
-
-
-
-
-
-
-
-  try {
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // POST body
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const body =
-
-
-
-      JSON.parse(
-
-
-
-        (
-
-
-
-          e &&
-
-
-
-          e.postData &&
-
-
-
-          e.postData.contents
-
-
-
-        )
-
-
-
-          ? e.postData.contents
-
-
-
-          : '{}'
-
-
-
-      );
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // Secret認証
-
-
-
-    //
-
-
-
-    // 既存Secretをそのまま使用
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const expectedSecret =
-
-
-
-      PropertiesService
-
-
-
-        .getScriptProperties()
-
-
-
-        .getProperty(
-
-
-
-          MARKET_INGEST.SECRET_PROP
-
-
-
-        );
-
-
-
-
-
-
-
-    if (
-
-
-
-      !expectedSecret ||
-
-
-
-      body.secret !== expectedSecret
-
-
-
-    ) {
-
-
-
-
-
-
-
-      return jsonResponse_({
-
-
-
-        ok: false,
-
-
-
-        error: 'unauthorized'
-
-
-
-      });
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // Spreadsheet
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const ss =
-
-
-
-      SpreadsheetApp.openById(
-
-
-
-        MARKET_INGEST.SPREADSHEET_ID
-
-
-
-      );
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // ① 監視設定取得
-
-
-
-    //
-
-
-
-    // GitHubから:
-
-
-
-    //
-
-
-
-    // {
-
-
-
-    //   secret: "...",
-
-
-
-    //   action: "getConfig",
-
-
-
-    //   market: "ヤフオク"
-
-
-
-    // }
-
-
-
-    //
-
-
-
-    // market省略なら
-
-
-
-    // Mercari + YahooすべてのON条件を返す
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const action =
-
-
-
-      String(
-
-
-
-        body.action || ''
-
-
-
-      ).trim();
-
-
-
-
-
-
-
-    if (
-
-
-
-      action === 'getConfig'
-
-
-
-    ) {
-
-
-
-
-
-
-
-      const marketFilter =
-
-
-
-        String(
-
-
-
-          body.market || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      if (
-
-
-
-        marketFilter
-
-
-
-        &&
-
-
-
-        marketFilter !== 'メルカリ'
-
-
-
-        &&
-
-
-
-        marketFilter !== 'ヤフオク'
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return jsonResponse_({
-
-
-
-          ok: false,
-
-
-
-          error:
-
-
-
-            'invalid market filter'
-
-
-
-        });
-
-
-
-      }
-
-
-
-
-
-
-
-      const configs =
-
-
-
-        getEnabledMarketConfigs_(
-
-
-
-          ss,
-
-
-
-          marketFilter
-
-
-
-        );
-
-
-
-
-
-
-
-      return jsonResponse_({
-
-
-
-        ok: true,
-
-
-
-
-
-
-
-        action:
-
-
-
-          'getConfig',
-
-
-
-
-
-
-
-        marketFilter:
-
-
-
-          marketFilter || 'ALL',
-
-
-
-
-
-
-
-        count:
-
-
-
-          configs.length,
-
-
-
-
-
-
-
-        configs
-
-
-
-      });
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // ①-B 利益商品探索AI Historical Backfill 対象取得
-
-
-
-    // 商品マスター + 利益商品探索AIから、
-
-
-
-    // 過去市場データ未取得の商品を優先度順に返す。
-
-
-
-    // 読み取り専用なのでScript Lock対象外。
-
-
-
-    // ========================================================
-
-
-
-    if (
-
-
-
-      action === 'getHistoricalBackfillTargets'
-
-
-
-    ) {
-
-
-
-      return jsonResponse_(
-
-
-
-        getHistoricalBackfillTargets_(
-
-
-
-          ss,
-
-
-
-          body
-
-
-
-        )
-
-
-
-      );
-
-
-
-    }
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 書き込み系だけScript Lockを取得
-
-
-
-    //
-
-
-
-    // getConfig は読み取り専用なので、
-
-
-
-    // Mercari / Yahoo / Market Comps が重なっても
-
-
-
-    // busyで弾かれないようロック対象外にする。
-
-
-
-    // ========================================================
-
-
-
-    lock =
-
-
-
-      LockService.getScriptLock();
-
-
-
-
-
-
-
-    if (
-
-
-
-      !lock.tryLock(5000)
-
-
-
-    ) {
-
-
-
-
-
-
-
-      return jsonResponse_({
-
-
-
-        ok: false,
-
-
-
-        error: 'busy'
-
-
-
-      });
-
-
-
-    }
-
-
-
-
-
-
-
-    lockAcquired = true;
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // ①-C Historical Backfill 結果保存
-
-
-
-    // 利益商品探索AI Y:AH に、
-
-
-
-    // Yahoo終了180日間の過去実売サマリーを保存する。
-
-
-
-    // ========================================================
-
-
-
-    if (
-
-
-
-      action === 'upsertHistoricalBackfill'
-
-
-
-    ) {
-
-
-
-      return upsertHistoricalBackfill_(
-
-
-
-        ss,
-
-
-
-        body
-
-
-
-      );
-
-
-
-    }
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // ② 相場比較データ upsert
-
-
-
-    //
-
-
-
-    // GitHubから:
-
-
-
-    //
-
-
-
-    // {
-
-
-
-    //   secret: "...",
-
-
-
-    //   action: "upsertMarketComps",
-
-
-
-    //   target: { ... },
-
-
-
-    //   comparisons: [ ... ]
-
-
-
-    // }
-
-
-
-    //
-
-
-
-    // 既存の市場監視台帳には触らない。
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    if (
-
-
-
-      action === 'upsertMarketComps'
-
-
-
-    ) {
-
-
-
-
-
-
-
-      return upsertMarketComps_(
-
-
-
-        ss,
-
-
-
-        body
-
-
-
-      );
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // ③ 以下は従来の市場監視台帳upsert
-
-
-
-    //
-
-
-
-    // 既存仕様を維持
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const market =
-
-
-
-      String(
-
-
-
-        body.market || ''
-
-
-
-      ).trim();
-
-
-
-
-
-
-
-    const conditionId =
-
-
-
-      String(
-
-
-
-        body.conditionId || ''
-
-
-
-      ).trim();
-
-
-
-
-
-
-
-    const items =
-
-
-
-      Array.isArray(body.items)
-
-
-
-        ? body.items
-
-
-
-        : [];
-
-
-
-
-
-
-
-    if (
-
-
-
-      market !== 'メルカリ'
-
-
-
-      &&
-
-
-
-      market !== 'ヤフオク'
-
-
-
-    ) {
-
-
-
-
-
-
-
-      return jsonResponse_({
-
-
-
-        ok: false,
-
-
-
-        error: 'invalid market'
-
-
-
-      });
-
-
-
-    }
-
-
-
-
-
-
-
-    if (!conditionId) {
-
-
-
-
-
-
-
-      return jsonResponse_({
-
-
-
-        ok: false,
-
-
-
-        error: 'conditionId required'
-
-
-
-      });
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    const sheet =
-
-
-
-      ss.getSheetByName(
-
-
-
-        MARKET_INGEST.SHEET_NAME
-
-
-
-      );
-
-
-
-
-
-
-
-    if (!sheet) {
-
-
-
-
-
-
-
-      throw new Error(
-
-
-
-        '市場監視台帳が見つかりません'
-
-
-
-      );
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    const lastRow =
-
-
-
-      sheet.getLastRow();
-
-
-
-
-
-
-
-    const existingRows =
-
-
-
-      lastRow >= 2
-
-
-
-
-
-
-
-        ? sheet
-
-
-
-            .getRange(
-
-
-
-              2,
-
-
-
-              1,
-
-
-
-              lastRow - 1,
-
-
-
-              21
-
-
-
-            )
-
-
-
-            .getValues()
-
-
-
-
-
-
-
-        : [];
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // Market Comps 既取得対象キーMap
-
-
-
-    //
-
-
-
-    // 目的:
-
-
-
-    // ・新規時に相場取得できなかった商品でも、
-
-
-
-    //   後からDB商品IDが入った場合に再度Market Comps対象へ戻す
-
-
-
-    // ・同じ対象で相場比較データが既に存在する場合は再取得しない
-
-
-
-    //
-
-
-
-    // 相場比較データ B列 = 対象キー
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const marketCompTargetKeyMap =
-
-
-
-      {};
-
-
-
-
-
-
-
-    const marketCompSheet =
-
-
-
-      ss.getSheetByName(
-
-
-
-        MARKET_INGEST.MARKET_COMPS_SHEET_NAME
-
-
-
-      );
-
-
-
-
-
-
-
-    if (
-
-
-
-      marketCompSheet &&
-
-
-
-      marketCompSheet.getLastRow() >= 2
-
-
-
-    ) {
-
-
-
-
-
-
-
-      marketCompSheet
-
-
-
-        .getRange(
-
-
-
-          2,
-
-
-
-          2,
-
-
-
-          marketCompSheet.getLastRow() - 1,
-
-
-
-          1
-
-
-
-        )
-
-
-
-        .getValues()
-
-
-
-        .forEach(
-
-
-
-          row => {
-
-
-
-
-
-
-
-            const targetKey =
-
-
-
-              String(
-
-
-
-                row[0] || ''
-
-
-
-              ).trim();
-
-
-
-
-
-
-
-            if (targetKey) {
-
-
-
-              marketCompTargetKeyMap[
-
-
-
-                targetKey
-
-
-
-              ] =
-
-
-
-                true;
-
-
-
-            }
-
-
-
-          }
-
-
-
-        );
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 商品マスター metadata Map
-
-
-
-    //
-
-
-
-    // Market Comps はDB同定後だけ実行する。
-
-
-
-    // GitHubへDB商品ID・ブランド・カテゴリ・商品・検索語等を返す。
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const masterMetaMap =
-
-
-
-      {};
-
-
-
-
-
-
-
-    const masterSheet =
-
-
-
-      ss.getSheetByName(
-
-
-
-        MARKET_INGEST.MASTER_SHEET_NAME
-
-
-
-      );
-
-
-
-
-
-
-
-    if (!masterSheet) {
-
-
-
-      throw new Error(
-
-
-
-        '商品マスターが見つかりません'
-
-
-
-      );
-
-
-
-    }
-
-
-
-
-
-
-
-    if (
-
-
-
-      masterSheet.getLastRow() >= 2
-
-
-
-    ) {
-
-
-
-
-
-
-
-      masterSheet
-
-
-
-        .getRange(
-
-
-
-          2,
-
-
-
-          1,
-
-
-
-          masterSheet.getLastRow() - 1,
-
-
-
-          32
-
-
-
-        )
-
-
-
-        .getValues()
-
-
-
-        .forEach(
-
-
-
-          row => {
-
-
-
-
-
-
-
-            const dbItemId =
-
-
-
-              String(
-
-
-
-                row[0] || ''
-
-
-
-              ).trim();
-
-
-
-
-
-
-
-            const enabled =
-
-
-
-              String(
-
-
-
-                row[1] || ''
-
-
-
-              )
-
-
-
-                .trim()
-
-
-
-                .toUpperCase();
-
-
-
-
-
-
-
-            if (
-
-
-
-              !dbItemId ||
-
-
-
-              enabled !== 'ON'
-
-
-
-            ) {
-
-
-
-              return;
-
-
-
-            }
-
-
-
-
-
-
-
-            masterMetaMap[
-
-
-
-              dbItemId
-
-
-
-            ] = {
-
-
-
-
-
-
-
-              dbItemId,
-
-
-
-
-
-
-
-              category:
-
-
-
-                String(
-
-
-
-                  row[3] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              brand:
-
-
-
-                String(
-
-
-
-                  row[4] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              product:
-
-
-
-                String(
-
-
-
-                  row[5] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              model:
-
-
-
-                String(
-
-
-
-                  row[6] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              searchKeyword:
-
-
-
-                String(
-
-
-
-                  row[26] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              subCategory:
-
-
-
-                String(
-
-
-
-                  row[30] || ''
-
-
-
-                ).trim(),
-
-
-
-
-
-
-
-              lineModel:
-
-
-
-                String(
-
-
-
-                  row[31] || ''
-
-
-
-                ).trim()
-
-
-
-            };
-
-
-
-          }
-
-
-
-        );
-
-
-
-    }
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 既存商品Map
-
-
-
-    //
-
-
-
-    // 市場 + 出品ID
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const rowMap =
-
-
-
-      {};
-
-
-
-
-
-
-
-    existingRows.forEach(
-
-
-
-      (row, index) => {
-
-
-
-
-
-
-
-        const rowMarket =
-
-
-
-          String(
-
-
-
-            row[0] || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        const itemId =
-
-
-
-          String(
-
-
-
-            row[2] || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        if (
-
-
-
-          rowMarket &&
-
-
-
-          itemId
-
-
-
-        ) {
-
-
-
-
-
-
-
-          rowMap[
-
-
-
-            rowMarket +
-
-
-
-            '::' +
-
-
-
-            itemId
-
-
-
-          ] =
-
-
-
-            index + 2;
-
-
-
-        }
-
-
-
-      }
-
-
-
-    );
-
-
-
-
-
-
-
-
-
-
-
-    let inserted =
-
-
-
-      0;
-
-
-
-
-
-
-
-    const insertedItems =
-
-
-
-      [];
-
-
-
-
-
-
-
-    /**
-
-
-
-     * insertedItems は後方互換のため名称を維持。
-
-
-
-     *
-
-
-
-     * 実際には「DB同定済みの Market Comps取得対象」だけ返す。
-
-
-
-     *
-
-
-
-     * 条件:
-
-
-
-     * ・DB商品ID確定済み
-
-
-
-     * ・商品マスターmetadata取得済み
-
-
-
-     * ・相場比較データ0件
-
-
-
-     *
-
-
-
-     * 新規直後のDB未同定商品は流さない。
-
-
-
-     * V4等でDB同定後、次回監視で自動バックフィルする。
-
-
-
-     */
-
-
-
-    const marketCompQueued =
-
-
-
-      {};
-
-
-
-
-
-
-
-    let updated =
-
-
-
-      0;
-
-
-
-
-
-
-
-    const now =
-
-
-
-      new Date();
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 商品upsert
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    items.forEach(
-
-
-
-      item => {
-
-
-
-
-
-
-
-        const itemId =
-
-
-
-          String(
-
-
-
-            item.itemId || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        const url =
-
-
-
-          String(
-
-
-
-            item.url || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        const title =
-
-
-
-          String(
-
-
-
-            item.title || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        const price =
-
-
-
-          Number(
-
-
-
-            item.price || 0
-
-
-
-          );
-
-
-
-
-
-
-
-        const remainingTime =
-
-
-
-          String(
-
-
-
-            item.remainingTime || ''
-
-
-
-          ).trim();
-
-
-
-
-
-
-
-        const endTime =
-
-
-
-          item.endTime
-
-
-
-            ? new Date(
-
-
-
-                item.endTime
-
-
-
-              )
-
-
-
-            : '';
-
-
-
-
-
-
-
-        if (
-
-
-
-          !itemId ||
-
-
-
-          !url ||
-
-
-
-          !title ||
-
-
-
-          !price
-
-
-
-        ) {
-
-
-
-
-
-
-
-          return;
-
-
-
-        }
-
-
-
-
-
-
-
-
-
-
-
-        const key =
-
-
-
-          market +
-
-
-
-          '::' +
-
-
-
-          itemId;
-
-
-
-
-
-
-
-        const existingRow =
-
-
-
-          rowMap[key];
-
-
-
-
-
-
-
-
-
-
-
-        // ====================================================
-
-
-
-        // 既存商品
-
-
-
-        // ====================================================
-
-
-
-
-
-
-
-        if (
-
-
-
-          existingRow
-
-
-
-        ) {
-
-
-
-
-
-
-
-          const initialPrice =
-
-
-
-            sheet
-
-
-
-              .getRange(
-
-
-
-                existingRow,
-
-
-
-                6
-
-
-
-              )
-
-
-
-              .getValue();
-
-
-
-
-
-
-
-          const initialFound =
-
-
-
-            sheet
-
-
-
-              .getRange(
-
-
-
-                existingRow,
-
-
-
-                8
-
-
-
-              )
-
-
-
-              .getValue();
-
-
-
-
-
-
-
-
-
-
-
-          // ==================================================
-
-
-
-          // D〜J
-
-
-
-          //
-
-
-
-          // D URL
-
-
-
-          // E 商品名
-
-
-
-          // F 初回価格
-
-
-
-          // G 現在価格
-
-
-
-          // H 初回発見
-
-
-
-          // I 最終確認
-
-
-
-          // J 発見元
-
-
-
-          // ==================================================
-
-
-
-
-
-
-
-          sheet
-
-
-
-            .getRange(
-
-
-
-              existingRow,
-
-
-
-              4,
-
-
-
-              1,
-
-
-
-              7
-
-
-
-            )
-
-
-
-            .setValues([
-
-
-
-              [
-
-
-
-                url,
-
-
-
-                title,
-
-
-
-                initialPrice,
-
-
-
-                price,
-
-
-
-                initialFound,
-
-
-
-                now,
-
-
-
-                '市場走査'
-
-
-
-              ]
-
-
-
-            ]);
-
-
-
-
-
-
-
-
-
-
-
-          // ==================================================
-
-
-
-          // T 終了日時
-
-
-
-          // ==================================================
-
-
-
-
-
-
-
-          if (
-
-
-
-            endTime &&
-
-
-
-            endTime instanceof Date &&
-
-
-
-            !isNaN(
-
-
-
-              endTime.getTime()
-
-
-
-            )
-
-
-
-          ) {
-
-
-
-
-
-
-
-            sheet
-
-
-
-              .getRange(
-
-
-
-                existingRow,
-
-
-
-                20
-
-
-
-              )
-
-
-
-              .setValue(
-
-
-
-                endTime
-
-
-
-              );
-
-
-
-          }
-
-
-
-
-
-
-
-
-
-
-
-          // ==================================================
-
-
-
-          // U 残り時間
-
-
-
-          // ==================================================
-
-
-
-
-
-
-
-          sheet
-
-
-
-            .getRange(
-
-
-
-              existingRow,
-
-
-
-              21
-
-
-
-            )
-
-
-
-            .setValue(
-
-
-
-              remainingTime
-
-
-
-            );
-
-
-
-
-
-
-
-          updated++;
-
-
-
-
-
-
-
-
-
-
-
-          // ==================================================
-
-
-
-          // 既存商品 Market Comps 自動バックフィル
-
-
-
-          //
-
-
-
-          // 条件:
-
-
-
-          // ・K列 DB商品IDあり
-
-
-
-          // ・相場比較データに対象キーがまだ0件
-
-
-
-          //
-
-
-
-          // これにより、
-
-
-
-          // 「新規発見時はDB未同定だったが、
-
-
-
-          //   後から商品マスター追加でDB同定された商品」
-
-
-
-          // を自動でMarket Comps取得へ戻せる。
-
-
-
-          // ==================================================
-
-
-
-
-
-
-
-          const existingDbItemId =
-
-
-
-            String(
-
-
-
-              sheet
-
-
-
-                .getRange(
-
-
-
-                  existingRow,
-
-
-
-                  11
-
-
-
-                )
-
-
-
-                .getValue() || ''
-
-
-
-            ).trim();
-
-
-
-
-
-
-
-
-
-
-
-          const masterMeta =
-
-
-
-            existingDbItemId
-
-
-
-              ? masterMetaMap[
-
-
-
-                  existingDbItemId
-
-
-
-                ] || null
-
-
-
-              : null;
-
-
-
-
-
-
-
-
-
-
-
-          if (
-
-
-
-            existingDbItemId
-
-
-
-            &&
-
-
-
-            masterMeta
-
-
-
-            &&
-
-
-
-            !marketCompTargetKeyMap[
-
-
-
-              key
-
-
-
-            ]
-
-
-
-            &&
-
-
-
-            !marketCompQueued[
-
-
-
-              key
-
-
-
-            ]
-
-
-
-          ) {
-
-
-
-
-
-
-
-            insertedItems.push({
-
-
-
-
-
-
-
-              targetKey:
-
-
-
-                key,
-
-
-
-
-
-
-
-              market,
-
-
-
-
-
-
-
-              conditionId,
-
-
-
-
-
-
-
-              itemId,
-
-
-
-
-
-
-
-              url,
-
-
-
-
-
-
-
-              title,
-
-
-
-
-
-
-
-              currentPrice:
-
-
-
-                price,
-
-
-
-
-
-
-
-              dbItemId:
-
-
-
-                masterMeta.dbItemId,
-
-
-
-
-
-
-
-              brand:
-
-
-
-                masterMeta.brand,
-
-
-
-
-
-
-
-              category:
-
-
-
-                masterMeta.category,
-
-
-
-
-
-
-
-              product:
-
-
-
-                masterMeta.product,
-
-
-
-
-
-
-
-              model:
-
-
-
-                masterMeta.model,
-
-
-
-
-
-
-
-              searchKeyword:
-
-
-
-                masterMeta.searchKeyword,
-
-
-
-
-
-
-
-              subCategory:
-
-
-
-                masterMeta.subCategory,
-
-
-
-
-
-
-
-              lineModel:
-
-
-
-                masterMeta.lineModel,
-
-
-
-
-
-
-
-              backfill:
-
-
-
-                true,
-
-
-
-
-
-
-
-              reason:
-
-
-
-                'existing-db-no-comps'
-
-
-
-
-
-
-
-            });
-
-
-
-
-
-
-
-
-
-
-
-            marketCompQueued[
-
-
-
-              key
-
-
-
-            ] =
-
-
-
-              true;
-
-
-
-          }
-
-
-
-
-
-
-
-
-
-
-
-        // ====================================================
-
-
-
-        // 新規商品
-
-
-
-        // ====================================================
-
-
-
-
-
-
-
-        } else {
-
-
-
-
-
-
-
-          sheet.appendRow([
-
-
-
-
-
-
-
-            market,             // A 市場
-
-
-
-            conditionId,        // B 条件ID
-
-
-
-            itemId,             // C 出品ID
-
-
-
-            url,                // D 商品URL
-
-
-
-            title,              // E 商品名
-
-
-
-            price,              // F 初回価格
-
-
-
-            price,              // G 現在価格
-
-
-
-            now,                // H 初回発見
-
-
-
-            now,                // I 最終確認
-
-
-
-            '市場走査',         // J 発見元
-
-
-
-            '',                 // K DB商品ID
-
-
-
-            '',                 // L 自動判定
-
-
-
-            '',                 // M 保守判定
-
-
-
-            '',                 // N LINE通知
-
-
-
-            '',                 // O 最終判定価格
-
-
-
-            '',                 // P 最終判定日時
-
-
-
-            '',                 // Q 仕入方式
-
-
-
-            '',                 // R 1スタ適性
-
-
-
-            '',                 // S 1スタ安全仕入上限
-
-
-
-            endTime || '',      // T 終了日時
-
-
-
-            remainingTime       // U 残り時間
-
-
-
-
-
-
-
-          ]);
-
-
-
-
-
-
-
-          rowMap[key] =
-
-
-
-            sheet.getLastRow();
-
-
-
-
-
-
-
-          // 新規直後はK列(DB商品ID)が未確定。
-
-
-
-          // 誤カテゴリ相場を取らないためMarket Compsには流さない。
-
-
-
-          // DB同定後、次回監視で上のバックフィル対象になる。
-
-
-
-
-
-
-
-          inserted++;
-
-
-
-        }
-
-
-
-      }
-
-
-
-    );
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-    // 市場監視台帳 全体から Market Comps バックフィル
-
-    //
-
-    // 既存のバックフィルは「今回の検索結果に再登場した商品」だけが
-
-    // 対象だったため、検索トップNから落ちた商品は
-
-    // DB商品ID確定後も相場比較0件のまま残ることがあった。
-
-    //
-
-    // ここでは今回の検索結果とは無関係に、
-
-    // 市場監視台帳の既存行を新しい順に確認し、
-
-    //
-
-    // ・今回のmarketと同じ市場
-
-    // ・発見元 = 市場走査
-
-    // ・DB商品IDあり
-
-    // ・商品マスターmetadataあり
-
-    // ・相場比較データ0件
-
-    //
-
-    // を Market Comps対象へ戻す。
-
-    //
-
-    // 1リクエスト最大5件。
-
-    // 既存の相場取得済み商品は再取得しない。
-
-    // ========================================================
-
-
-
-    const GLOBAL_MARKET_COMP_BACKFILL_MAX =
-
-      5;
-
-
-
-    let globalBackfillAdded =
-
-      0;
-
-
-
-    for (
-
-      let i = existingRows.length - 1;
-
-      i >= 0;
-
-      i--
-
-    ) {
-
-
-
-      if (
-
-        globalBackfillAdded >=
-
-        GLOBAL_MARKET_COMP_BACKFILL_MAX
-
-      ) {
-
-        break;
-
-      }
-
-
-
-      const row =
-
-        existingRows[i];
-
-
-
-      const rowMarket =
-
-        String(
-
-          row[0] || ''
-
-        ).trim();
-
-
-
-      const rowConditionId =
-
-        String(
-
-          row[1] || ''
-
-        ).trim();
-
-
-
-      const rowItemId =
-
-        String(
-
-          row[2] || ''
-
-        ).trim();
-
-
-
-      const rowUrl =
-
-        String(
-
-          row[3] || ''
-
-        ).trim();
-
-
-
-      const rowTitle =
-
-        String(
-
-          row[4] || ''
-
-        ).trim();
-
-
-
-      const rowCurrentPrice =
-
-        Number(
-
-          row[6] || 0
-
-        );
-
-
-
-      const rowSource =
-
-        String(
-
-          row[9] || ''
-
-        ).trim();
-
-
-
-      const rowDbItemId =
-
-        String(
-
-          row[10] || ''
-
-        ).trim();
-
-
-
-      if (
-
-        rowMarket !== market ||
-
-        rowSource !== '市場走査' ||
-
-        !rowConditionId ||
-
-        !rowItemId ||
-
-        !rowUrl ||
-
-        !rowTitle ||
-
-        !rowCurrentPrice ||
-
-        !rowDbItemId
-
-      ) {
-
-        continue;
-
-      }
-
-
-
-      const key =
-
-        rowMarket +
-
-        '::' +
-
-        rowItemId;
-
-
-
-      if (
-
-        marketCompTargetKeyMap[
-
-          key
-
-        ] ||
-
-        marketCompQueued[
-
-          key
-
-        ]
-
-      ) {
-
-        continue;
-
-      }
-
-
-
-      const masterMeta =
-
-        masterMetaMap[
-
-          rowDbItemId
-
-        ] || null;
-
-
-
-      if (!masterMeta) {
-
-        continue;
-
-      }
-
-
-
-      insertedItems.push({
-
-
-
-        targetKey:
-
-          key,
-
-
-
-        market:
-
-          rowMarket,
-
-
-
-        conditionId:
-
-          rowConditionId,
-
-
-
-        itemId:
-
-          rowItemId,
-
-
-
-        url:
-
-          rowUrl,
-
-
-
-        title:
-
-          rowTitle,
-
-
-
-        currentPrice:
-
-          rowCurrentPrice,
-
-
-
-        dbItemId:
-
-          masterMeta.dbItemId,
-
-
-
-        brand:
-
-          masterMeta.brand,
-
-
-
-        category:
-
-          masterMeta.category,
-
-
-
-        product:
-
-          masterMeta.product,
-
-
-
-        model:
-
-          masterMeta.model,
-
-
-
-        searchKeyword:
-
-          masterMeta.searchKeyword,
-
-
-
-        subCategory:
-
-          masterMeta.subCategory,
-
-
-
-        lineModel:
-
-          masterMeta.lineModel,
-
-
-
-        backfill:
-
-          true,
-
-
-
-        reason:
-
-          'existing-db-no-comps'
-
-
-
-      });
-
-
-
-      marketCompQueued[
-
-        key
-
-      ] =
-
-        true;
-
-
-
-      globalBackfillAdded++;
-
-
-
-    }
-
-
-
-    if (
-
-      globalBackfillAdded > 0
-
-    ) {
-
-
-
-      console.log(
-
-        'Global Market Comps backfill queued: ' +
-
-        globalBackfillAdded
-
-      );
-
-
-
-    }
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 現在追跡中のYahoo商品一覧
-
-
-
-    //
-
-
-
-    // 検索結果から消えた後も
-
-
-
-    // GitHubが商品詳細ページを追跡できるよう返す
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    const trackedYahoo =
-
-
-
-      getTrackedYahooItems_(
-
-
-
-        sheet
-
-
-
-      );
-
-
-
-
-
-
-
-
-
-
-
-    // ========================================================
-
-
-
-    // 従来レスポンス
-
-
-
-    // ========================================================
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: true,
-
-
-
-
-
-
-
-      market,
-
-
-
-
-
-
-
-      conditionId,
-
-
-
-
-
-
-
-      received:
-
-
-
-        items.length,
-
-
-
-
-
-
-
-      inserted,
-
-
-
-
-
-
-
-      insertedItems,
-
-
-
-
-
-
-
-      marketCompTargetCount:
-
-
-
-        insertedItems.length,
-
-
-
-
-
-
-
-      updated,
-
-
-
-
-
-
-
-      trackedYahoo
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-  } catch (error) {
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: false,
-
-
-
-
-
-
-
-      error:
-
-
-
-        error &&
-
-
-
-        error.message
-
-
-
-          ? error.message
-
-
-
-          : String(error)
-
-
-
-
-
-
-
-    });
-
-
-
-
-
-
-
-  } finally {
-
-
-
-
-
-
-
-    if (
-
-
-
-      lockAcquired &&
-
-
-
-      lock
-
-
-
-    ) {
-
-
-
-
-
-
-
-      lock.releaseLock();
-
-
-
-    }
-
-
-
-  }
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// 市場監視設定
-
-
-
-//
-
-
-
-// A 条件ID
-
-
-
-// B 市場
-
-
-
-// C 検索条件名
-
-
-
-// D 検索URL
-
-
-
-// E 監視頻度(分)
-
-
-
-// F ON/OFF
-
-
-
-// G 最終監視日時
-
-
-
-// H 備考
-
-
-
-// I 取得件数
-
-
-
-// J 最終エラー
-
-
-
-//
-
-
-
-// ONの行だけGitHubへ返す
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function getEnabledMarketConfigs_(
-
-
-
-  ss,
-
-
-
-  marketFilter
-
-
-
-) {
-
-
-
-
-
-
-
-  const sheet =
-
-
-
-    ss.getSheetByName(
-
-
-
-      MARKET_INGEST.CONFIG_SHEET_NAME
-
-
-
-    );
-
-
-
-
-
-
-
-  if (!sheet) {
-
-
-
-
-
-
-
-    throw new Error(
-
-
-
-      '市場監視設定が見つかりません'
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-  const lastRow =
-
-
-
-    sheet.getLastRow();
-
-
-
-
-
-
-
-  if (
-
-
-
-    lastRow < 2
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return [];
-
-
-
-  }
-
-
-
-
-
-
-
-  const rows =
-
-
-
-    sheet
-
-
-
-      .getRange(
-
-
-
-        2,
-
-
-
-        1,
-
-
-
-        lastRow - 1,
-
-
-
-        10
-
-
-
-      )
-
-
-
-      .getValues();
-
-
-
-
-
-
-
-  const results =
-
-
-
-    [];
-
-
-
-
-
-
-
-  rows.forEach(
-
-
-
-    row => {
-
-
-
-
-
-
-
-      const conditionId =
-
-
-
-        String(
-
-
-
-          row[0] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const market =
-
-
-
-        String(
-
-
-
-          row[1] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const searchName =
-
-
-
-        String(
-
-
-
-          row[2] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const searchUrl =
-
-
-
-        String(
-
-
-
-          row[3] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const intervalMinutes =
-
-
-
-        Number(
-
-
-
-          row[4] || 0
-
-
-
-        );
-
-
-
-
-
-
-
-      const enabled =
-
-
-
-        String(
-
-
-
-          row[5] || ''
-
-
-
-        )
-
-
-
-          .trim()
-
-
-
-          .toUpperCase();
-
-
-
-
-
-
-
-
-
-
-
-      // ======================================================
-
-
-
-      // ON以外は返さない
-
-
-
-      // ======================================================
-
-
-
-
-
-
-
-      if (
-
-
-
-        enabled !== 'ON'
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-      // ======================================================
-
-
-
-      // 有効な市場だけ
-
-
-
-      // ======================================================
-
-
-
-
-
-
-
-      if (
-
-
-
-        market !== 'メルカリ'
-
-
-
-        &&
-
-
-
-        market !== 'ヤフオク'
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-      // ======================================================
-
-
-
-      // 市場フィルタ
-
-
-
-      // ======================================================
-
-
-
-
-
-
-
-      if (
-
-
-
-        marketFilter &&
-
-
-
-        market !== marketFilter
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-      // ======================================================
-
-
-
-      // 必須値
-
-
-
-      // ======================================================
-
-
-
-
-
-
-
-      if (
-
-
-
-        !conditionId ||
-
-
-
-        !searchUrl
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-      results.push({
-
-
-
-
-
-
-
-        conditionId,
-
-
-
-
-
-
-
-        market,
-
-
-
-
-
-
-
-        searchName,
-
-
-
-
-
-
-
-        searchUrl,
-
-
-
-
-
-
-
-        intervalMinutes:
-
-
-
-          intervalMinutes > 0
-
-
-
-            ? intervalMinutes
-
-
-
-            : 5
-
-
-
-
-
-
-
-      });
-
-
-
-    }
-
-
-
-  );
-
-
-
-
-
-
-
-  return results;
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// Yahoo追跡対象取得
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function getTrackedYahooItems_(
-
-
-
-  sheet
-
-
-
-) {
-
-
-
-
-
-
-
-  const lastRow =
-
-
-
-    sheet.getLastRow();
-
-
-
-
-
-
-
-  if (
-
-
-
-    lastRow < 2
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return [];
-
-
-
-  }
-
-
-
-
-
-
-
-  const rows =
-
-
-
-    sheet
-
-
-
-      .getRange(
-
-
-
-        2,
-
-
-
-        1,
-
-
-
-        lastRow - 1,
-
-
-
-        21
-
-
-
-      )
-
-
-
-      .getValues();
-
-
-
-
-
-
-
-  const results =
-
-
-
-    [];
-
-
-
-
-
-
-
-  rows.forEach(
-
-
-
-    row => {
-
-
-
-
-
-
-
-      const market =
-
-
-
-        String(
-
-
-
-          row[0] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const conditionId =
-
-
-
-        String(
-
-
-
-          row[1] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const itemId =
-
-
-
-        String(
-
-
-
-          row[2] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const url =
-
-
-
-        String(
-
-
-
-          row[3] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const title =
-
-
-
-        String(
-
-
-
-          row[4] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const currentPrice =
-
-
-
-        Number(
-
-
-
-          row[6] || 0
-
-
-
-        );
-
-
-
-
-
-
-
-      const procurementType =
-
-
-
-        String(
-
-
-
-          row[16] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      if (
-
-
-
-        market !== 'ヤフオク'
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-      if (
-
-
-
-        !itemId ||
-
-
-
-        !url
-
-
-
-      ) {
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-      results.push({
-
-
-
-
-
-
-
-        conditionId,
-
-
-
-
-
-
-
-        itemId,
-
-
-
-
-
-
-
-        url,
-
-
-
-
-
-
-
-        title,
-
-
-
-
-
-
-
-        currentPrice,
-
-
-
-
-
-
-
-        procurementType
-
-
-
-
-
-
-
-      });
-
-
-
-    }
-
-
-
-  );
-
-
-
-
-
-
-
-  return results;
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// 相場比較データ upsert
-
-
-
-//
-
-
-
-// 1行 = 1対象商品 × 1比較商品
-
-
-
-//
-
-
-
-// 重複キー:
-
-
-
-// 対象キー + 比較市場 + 比較出品ID
-
-
-
-//
-
-
-
-// 既存行更新時は A:W と AO:AQ のみ更新。
-
-
-
-// X:AN の相場エンジン計算列は保持する。
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function upsertMarketComps_(
-
-
-
-  ss,
-
-
-
-  body
-
-
-
-) {
-
-
-
-
-
-
-
-  const sheet =
-
-
-
-    ss.getSheetByName(
-
-
-
-      MARKET_INGEST.MARKET_COMPS_SHEET_NAME
-
-
-
-    );
-
-
-
-
-
-
-
-  if (!sheet) {
-
-
-
-
-
-
-
-    throw new Error(
-
-
-
-      '相場比較データが見つかりません'
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-  validateMarketCompsHeaders_(
-
-
-
-    sheet
-
-
-
-  );
-
-
-
-
-
-
-
-
-
-
-
-  const target =
-
-
-
-    body &&
-
-
-
-    body.target &&
-
-
-
-    typeof body.target === 'object'
-
-
-
-      ? body.target
-
-
-
-      : {};
-
-
-
-
-
-
-
-  const comparisons =
-
-
-
-    Array.isArray(
-
-
-
-      body.comparisons
-
-
-
-    )
-
-
-
-      ? body.comparisons
-
-
-
-      : [];
-
-
-
-
-
-
-
-
-
-
-
-  const targetKey =
-
-
-
-    String(
-
-
-
-      target.targetKey ||
-
-
-
-      target.key ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetMarket =
-
-
-
-    String(
-
-
-
-      target.market ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetConditionId =
-
-
-
-    String(
-
-
-
-      target.conditionId ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetItemId =
-
-
-
-    String(
-
-
-
-      target.itemId ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetUrl =
-
-
-
-    String(
-
-
-
-      target.url ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetTitle =
-
-
-
-    String(
-
-
-
-      target.title ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetDbItemId =
-
-
-
-    String(
-
-
-
-      target.dbItemId ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetBrand =
-
-
-
-    String(
-
-
-
-      target.brand ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetCategory =
-
-
-
-    String(
-
-
-
-      target.category ||
-
-
-
-      ''
-
-
-
-    ).trim();
-
-
-
-
-
-
-
-  const targetCurrentPrice =
-
-
-
-    positiveNumberOrZero_(
-
-
-
-      target.currentPrice
-
-
-
-    );
-
-
-
-
-
-
-
-
-
-
-
-  if (!targetKey) {
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: false,
-
-
-
-
-
-
-
-      action:
-
-
-
-        'upsertMarketComps',
-
-
-
-
-
-
-
-      error:
-
-
-
-        'target.targetKey required'
-
-
-
-
-
-
-
-    });
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  if (
-
-
-
-    targetMarket !== 'メルカリ'
-
-
-
-    &&
-
-
-
-    targetMarket !== 'ヤフオク'
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: false,
-
-
-
-
-
-
-
-      action:
-
-
-
-        'upsertMarketComps',
-
-
-
-
-
-
-
-      error:
-
-
-
-        'invalid target.market'
-
-
-
-
-
-
-
-    });
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  if (
-
-
-
-    !targetItemId ||
-
-
-
-    !targetUrl ||
-
-
-
-    !targetTitle ||
-
-
-
-    !targetCurrentPrice
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: false,
-
-
-
-
-
-
-
-      action:
-
-
-
-        'upsertMarketComps',
-
-
-
-
-
-
-
-      error:
-
-
-
-        'target itemId/url/title/currentPrice required'
-
-
-
-
-
-
-
-    });
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  if (
-
-
-
-    comparisons.length === 0
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return jsonResponse_({
-
-
-
-
-
-
-
-      ok: true,
-
-
-
-
-
-
-
-      action:
-
-
-
-        'upsertMarketComps',
-
-
-
-
-
-
-
-      targetKey,
-
-
-
-
-
-
-
-      received: 0,
-
-
-
-
-
-
-
-      inserted: 0,
-
-
-
-
-
-
-
-      updated: 0,
-
-
-
-
-
-
-
-      skipped: 0
-
-
-
-
-
-
-
-    });
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  const lastRow =
-
-
-
-    sheet.getLastRow();
-
-
-
-
-
-
-
-  const existingRows =
-
-
-
-    lastRow >= 2
-
-
-
-
-
-
-
-      ? sheet
-
-
-
-          .getRange(
-
-
-
-            2,
-
-
-
-            1,
-
-
-
-            lastRow - 1,
-
-
-
-            MARKET_INGEST.MARKET_COMPS_COLUMN_COUNT
-
-
-
-          )
-
-
-
-          .getValues()
-
-
-
-
-
-
-
-      : [];
-
-
-
-
-
-
-
-
-
-
-
-  const rowMap =
-
-
-
-    {};
-
-
-
-
-
-
-
-  existingRows.forEach(
-
-
-
-    (row, index) => {
-
-
-
-
-
-
-
-      const existingTargetKey =
-
-
-
-        String(
-
-
-
-          row[1] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonMarket =
-
-
-
-        String(
-
-
-
-          row[11] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonItemId =
-
-
-
-        String(
-
-
-
-          row[13] || ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      if (
-
-
-
-        existingTargetKey &&
-
-
-
-        comparisonMarket &&
-
-
-
-        comparisonItemId
-
-
-
-      ) {
-
-
-
-
-
-
-
-        rowMap[
-
-
-
-          marketCompKey_(
-
-
-
-            existingTargetKey,
-
-
-
-            comparisonMarket,
-
-
-
-            comparisonItemId
-
-
-
-          )
-
-
-
-        ] =
-
-
-
-          index + 2;
-
-
-
-      }
-
-
-
-    }
-
-
-
-  );
-
-
-
-
-
-
-
-
-
-
-
-  const now =
-
-
-
-    new Date();
-
-
-
-
-
-
-
-  let inserted =
-
-
-
-    0;
-
-
-
-
-
-
-
-  let updated =
-
-
-
-    0;
-
-
-
-
-
-
-
-  let skipped =
-
-
-
-    0;
-
-
-
-
-
-
-
-
-
-
-
-  comparisons.forEach(
-
-
-
-    comparison => {
-
-
-
-
-
-
-
-      const comparisonMarket =
-
-
-
-        String(
-
-
-
-          comparison.comparisonMarket ||
-
-
-
-          comparison.market ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonType =
-
-
-
-        String(
-
-
-
-          comparison.comparisonType ||
-
-
-
-          comparison.type ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonItemId =
-
-
-
-        String(
-
-
-
-          comparison.comparisonItemId ||
-
-
-
-          comparison.itemId ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonUrl =
-
-
-
-        String(
-
-
-
-          comparison.comparisonUrl ||
-
-
-
-          comparison.url ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonTitle =
-
-
-
-        String(
-
-
-
-          comparison.comparisonTitle ||
-
-
-
-          comparison.title ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const comparisonPrice =
-
-
-
-        positiveNumberOrZero_(
-
-
-
-          comparison.comparisonPrice !== undefined
-
-
-
-            ? comparison.comparisonPrice
-
-
-
-            : comparison.price
-
-
-
-        );
-
-
-
-
-
-
-
-      const shipping =
-
-
-
-        nullableNonNegativeNumber_(
-
-
-
-          comparison.shipping
-
-
-
-        );
-
-
-
-
-
-
-
-      const comparisonTotal =
-
-
-
-        positiveNumberOrZero_(
-
-
-
-          comparison.comparisonTotal
-
-
-
-        )
-
-
-
-        ||
-
-
-
-        (
-
-
-
-          comparisonPrice +
-
-
-
-          (
-
-
-
-            shipping === null
-
-
-
-              ? 0
-
-
-
-              : shipping
-
-
-
-          )
-
-
-
-        );
-
-
-
-
-
-
-
-      const currency =
-
-
-
-        String(
-
-
-
-          comparison.currency ||
-
-
-
-          'JPY'
-
-
-
-        )
-
-
-
-          .trim()
-
-
-
-          .toUpperCase();
-
-
-
-
-
-
-
-      const jpyTotal =
-
-
-
-        positiveNumberOrZero_(
-
-
-
-          comparison.jpyTotal
-
-
-
-        )
-
-
-
-        ||
-
-
-
-        (
-
-
-
-          currency === 'JPY'
-
-
-
-            ? comparisonTotal
-
-
-
-            : 0
-
-
-
-        );
-
-
-
-
-
-
-
-      const endedAt =
-
-
-
-        validDateOrBlank_(
-
-
-
-          comparison.endedAt
-
-
-
-        );
-
-
-
-
-
-
-
-      const condition =
-
-
-
-        String(
-
-
-
-          comparison.condition ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const source =
-
-
-
-        String(
-
-
-
-          comparison.source ||
-
-
-
-          body.source ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const version =
-
-
-
-        String(
-
-
-
-          comparison.version ||
-
-
-
-          body.version ||
-
-
-
-          body.sourceVersion ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const query =
-
-
-
-        String(
-
-
-
-          comparison.query ||
-
-
-
-          body.query ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-      const sourceCategoryId =
-
-
-
-        String(
-
-
-
-          comparison.categoryId ||
-
-
-
-          body.categoryId ||
-
-
-
-          ''
-
-
-
-        ).trim();
-
-
-
-
-
-
-
-
-
-
-
-      if (
-
-
-
-        (
-
-
-
-          comparisonMarket !== 'メルカリ'
-
-
-
-          &&
-
-
-
-          comparisonMarket !== 'ヤフオク'
-
-
-
-          &&
-
-
-
-          comparisonMarket !== 'eBay'
-
-
-
-        )
-
-
-
-        ||
-
-
-
-        !comparisonItemId
-
-
-
-        ||
-
-
-
-        !comparisonUrl
-
-
-
-        ||
-
-
-
-        !comparisonTitle
-
-
-
-        ||
-
-
-
-        !comparisonPrice
-
-
-
-      ) {
-
-
-
-
-
-
-
-        skipped++;
-
-
-
-
-
-
-
-        return;
-
-
-
-      }
-
-
-
-
-
-
-
-
-
-
-
-      const row = [
-
-
-
-
-
-
-
-        now,                    // A 取得日時
-
-
-
-
-
-
-
-        targetKey,              // B 対象キー
-
-
-
-
-
-
-
-        targetMarket,           // C 対象市場
-
-
-
-
-
-
-
-        targetConditionId,      // D 対象条件ID
-
-
-
-
-
-
-
-        targetItemId,           // E 対象出品ID
-
-
-
-
-
-
-
-        targetUrl,              // F 対象URL
-
-
-
-
-
-
-
-        targetTitle,            // G 対象商品名
-
-
-
-
-
-
-
-        targetDbItemId,         // H 対象DB商品ID
-
-
-
-
-
-
-
-        targetBrand,            // I 対象ブランド
-
-
-
-
-
-
-
-        targetCategory,         // J 対象カテゴリー
-
-
-
-
-
-
-
-        targetCurrentPrice,     // K 対象現在価格
-
-
-
-
-
-
-
-        comparisonMarket,       // L 比較市場
-
-
-
-
-
-
-
-        comparisonType,         // M 比較種別
-
-
-
-
-
-
-
-        comparisonItemId,       // N 比較出品ID
-
-
-
-
-
-
-
-        comparisonUrl,          // O 比較URL
-
-
-
-
-
-
-
-        comparisonTitle,        // P 比較商品名
-
-
-
-
-
-
-
-        comparisonPrice,        // Q 比較価格
-
-
-
-
-
-
-
-        shipping === null
-
-
-
-          ? ''
-
-
-
-          : shipping,           // R 比較送料
-
-
-
-
-
-
-
-        comparisonTotal,        // S 比較総額
-
-
-
-
-
-
-
-        currency,               // T 通貨
-
-
-
-
-
-
-
-        jpyTotal || '',         // U 円換算総額
-
-
-
-
-
-
-
-        endedAt,                // V 成約/終了日時
-
-
-
-
-
-
-
-        condition,              // W 比較状態
-
-
-
-
-
-
-
-        '',                     // X ブランド一致
-
-
-
-
-
-
-
-        '',                     // Y カテゴリー一致
-
-
-
-
-
-
-
-        '',                     // Z モデル/ライン一致
-
-
-
-
-
-
-
-        '',                     // AA サイズ一致
-
-
-
-
-
-
-
-        '',                     // AB 素材一致
-
-
-
-
-
-
-
-        '',                     // AC 色一致
-
-
-
-
-
-
-
-        '',                     // AD 高値要素
-
-
-
-
-
-
-
-        '',                     // AE 高値要素一致
-
-
-
-
-
-
-
-        '',                     // AF 類似度
-
-
-
-
-
-
-
-        '',                     // AG 経過日数
-
-
-
-
-
-
-
-        '',                     // AH 時間重み
-
-
-
-
-
-
-
-        '',                     // AI 状態補正率
-
-
-
-
-
-
-
-        '',                     // AJ 高値要素補正率
-
-
-
-
-
-
-
-        '',                     // AK 除外
-
-
-
-
-
-
-
-        '',                     // AL 除外理由
-
-
-
-
-
-
-
-        '',                     // AM 最終重み
-
-
-
-
-
-
-
-        '',                     // AN 補正後価格
-
-
-
-
-
-
-
-        source,                 // AO データ元
-
-
-
-
-
-
-
-        version,                // AP 取得バージョン
-
-
-
-
-
-
-
-        buildMarketCompNote_(
-
-
-
-          query,
-
-
-
-          sourceCategoryId
-
-
-
-        )                       // AQ 備考
-
-
-
-
-
-
-
-      ];
-
-
-
-
-
-
-
-
-
-
-
-      const key =
-
-
-
-        marketCompKey_(
-
-
-
-          targetKey,
-
-
-
-          comparisonMarket,
-
-
-
-          comparisonItemId
-
-
-
-        );
-
-
-
-
-
-
-
-
-
-
-
-      const existingRow =
-
-
-
-        rowMap[key];
-
-
-
-
-
-
-
-
-
-
-
-      if (existingRow) {
-
-
-
-
-
-
-
-        // A:W
-
-
-
-        sheet
-
-
-
-          .getRange(
-
-
-
-            existingRow,
-
-
-
-            1,
-
-
-
-            1,
-
-
-
-            23
-
-
-
-          )
-
-
-
-          .setValues([
-
-
-
-            row.slice(
-
-
-
-              0,
-
-
-
-              23
-
-
-
-            )
-
-
-
-          ]);
-
-
-
-
-
-
-
-
-
-
-
-        // AO:AQ
-
-
-
-        sheet
-
-
-
-          .getRange(
-
-
-
-            existingRow,
-
-
-
-            41,
-
-
-
-            1,
-
-
-
-            3
-
-
-
-          )
-
-
-
-          .setValues([
-
-
-
-            row.slice(
-
-
-
-              40,
-
-
-
-              43
-
-
-
-            )
-
-
-
-          ]);
-
-
-
-
-
-
-
-
-
-
-
-        updated++;
-
-
-
-
-
-
-
-      } else {
-
-
-
-
-
-
-
-        sheet.appendRow(
-
-
-
-          row
-
-
-
-        );
-
-
-
-
-
-
-
-        rowMap[key] =
-
-
-
-          sheet.getLastRow();
-
-
-
-
-
-
-
-        inserted++;
-
-
-
-      }
-
-
-
-    }
-
-
-
-  );
-
-
-
-
-
-
-
-
-
-
-
-  return jsonResponse_({
-
-
-
-
-
-
-
-    ok: true,
-
-
-
-
-
-
-
-    action:
-
-
-
-      'upsertMarketComps',
-
-
-
-
-
-
-
-    targetKey,
-
-
-
-
-
-
-
-    received:
-
-
-
-      comparisons.length,
-
-
-
-
-
-
-
-    inserted,
-
-
-
-
-
-
-
-    updated,
-
-
-
-
-
-
-
-    skipped
-
-
-
-
-
-
-
-  });
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// 相場比較データ ヘッダー固定
-
-
-
-//
-
-
-
-// A:AQ = 43列
-
-
-
-//
-
-
-
-// 構造が違う場合は
-
-
-
-// 誤書き込みを避けるため安全停止。
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function validateMarketCompsHeaders_(
-
-
-
-  sheet
-
-
-
-) {
-
-
-
-
-
-
-
-  const expected = [
-
-
-
-
-
-
-
-    '取得日時',
-
-
-
-
-
-
-
-    '対象キー',
-
-
-
-
-
-
-
-    '対象市場',
-
-
-
-
-
-
-
-    '対象条件ID',
-
-
-
-
-
-
-
-    '対象出品ID',
-
-
-
-
-
-
-
-    '対象URL',
-
-
-
-
-
-
-
-    '対象商品名',
-
-
-
-
-
-
-
-    '対象DB商品ID',
-
-
-
-
-
-
-
-    '対象ブランド',
-
-
-
-
-
-
-
-    '対象カテゴリー',
-
-
-
-
-
-
-
-    '対象現在価格',
-
-
-
-
-
-
-
-    '比較市場',
-
-
-
-
-
-
-
-    '比較種別',
-
-
-
-
-
-
-
-    '比較出品ID',
-
-
-
-
-
-
-
-    '比較URL',
-
-
-
-
-
-
-
-    '比較商品名',
-
-
-
-
-
-
-
-    '比較価格',
-
-
-
-
-
-
-
-    '比較送料',
-
-
-
-
-
-
-
-    '比較総額',
-
-
-
-
-
-
-
-    '通貨',
-
-
-
-
-
-
-
-    '円換算総額',
-
-
-
-
-
-
-
-    '成約/終了日時',
-
-
-
-
-
-
-
-    '比較状態',
-
-
-
-
-
-
-
-    'ブランド一致',
-
-
-
-
-
-
-
-    'カテゴリー一致',
-
-
-
-
-
-
-
-    'モデル/ライン一致',
-
-
-
-
-
-
-
-    'サイズ一致',
-
-
-
-
-
-
-
-    '素材一致',
-
-
-
-
-
-
-
-    '色一致',
-
-
-
-
-
-
-
-    '高値要素',
-
-
-
-
-
-
-
-    '高値要素一致',
-
-
-
-
-
-
-
-    '類似度',
-
-
-
-
-
-
-
-    '経過日数',
-
-
-
-
-
-
-
-    '時間重み',
-
-
-
-
-
-
-
-    '状態補正率',
-
-
-
-
-
-
-
-    '高値要素補正率',
-
-
-
-
-
-
-
-    '除外',
-
-
-
-
-
-
-
-    '除外理由',
-
-
-
-
-
-
-
-    '最終重み',
-
-
-
-
-
-
-
-    '補正後価格',
-
-
-
-
-
-
-
-    'データ元',
-
-
-
-
-
-
-
-    '取得バージョン',
-
-
-
-
-
-
-
-    '備考'
-
-
-
-
-
-
-
-  ];
-
-
-
-
-
-
-
-
-
-
-
-  if (
-
-
-
-    expected.length !==
-
-
-
-    MARKET_INGEST.MARKET_COMPS_COLUMN_COUNT
-
-
-
-  ) {
-
-
-
-
-
-
-
-    throw new Error(
-
-
-
-      '相場比較データの内部列定義が不正です'
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  if (
-
-
-
-    sheet.getLastColumn() <
-
-
-
-    MARKET_INGEST.MARKET_COMPS_COLUMN_COUNT
-
-
-
-  ) {
-
-
-
-
-
-
-
-    throw new Error(
-
-
-
-      '相場比較データの列数が不足しています'
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-
-
-
-
-  const actual =
-
-
-
-    sheet
-
-
-
-      .getRange(
-
-
-
-        1,
-
-
-
-        1,
-
-
-
-        1,
-
-
-
-        MARKET_INGEST.MARKET_COMPS_COLUMN_COUNT
-
-
-
-      )
-
-
-
-      .getValues()[0]
-
-
-
-      .map(
-
-
-
-        value =>
-
-
-
-          String(
-
-
-
-            value || ''
-
-
-
-          ).trim()
-
-
-
-      );
-
-
-
-
-
-
-
-
-
-
-
-  for (
-
-
-
-    let i = 0;
-
-
-
-    i < expected.length;
-
-
-
-    i++
-
-
-
-  ) {
-
-
-
-
-
-
-
-    if (
-
-
-
-      actual[i] !==
-
-
-
-      expected[i]
-
-
-
-    ) {
-
-
-
-
-
-
-
-      throw new Error(
-
-
-
-        '相場比較データの列構造が想定と違います。' +
-
-
-
-        '安全のため停止しました。' +
-
-
-
-        ' 列' +
-
-
-
-        (i + 1) +
-
-
-
-        ': 期待="' +
-
-
-
-        expected[i] +
-
-
-
-        '" / 実際="' +
-
-
-
-        actual[i] +
-
-
-
-        '"'
-
-
-
-      );
-
-
-
-    }
-
-
-
-  }
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// 相場比較データ helper
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function marketCompKey_(
-
-
-
-  targetKey,
-
-
-
-  comparisonMarket,
-
-
-
-  comparisonItemId
-
-
-
-) {
-
-
-
-
-
-
-
-  return [
-
-
-
-
-
-
-
-    String(
-
-
-
-      targetKey || ''
-
-
-
-    ).trim(),
-
-
-
-
-
-
-
-    String(
-
-
-
-      comparisonMarket || ''
-
-
-
-    ).trim(),
-
-
-
-
-
-
-
-    String(
-
-
-
-      comparisonItemId || ''
-
-
-
-    ).trim()
-
-
-
-
-
-
-
-  ].join(
-
-
-
-    '::'
-
-
-
-  );
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-function positiveNumberOrZero_(
-
-
-
-  value
-
-
-
-) {
-
-
-
-
-
-
-
-  const number =
-
-
-
-    Number(
-
-
-
-      value
-
-
-
-    );
-
-
-
-
-
-
-
-  return (
-
-
-
-    Number.isFinite(
-
-
-
-      number
-
-
-
-    )
-
-
-
-    &&
-
-
-
-    number > 0
-
-
-
-  )
-
-
-
-    ? number
-
-
-
-    : 0;
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-function nullableNonNegativeNumber_(
-
-
-
-  value
-
-
-
-) {
-
-
-
-
-
-
-
-  if (
-
-
-
-    value === null ||
-
-
-
-    value === undefined ||
-
-
-
-    value === ''
-
-
-
-  ) {
-
-
-
-
-
-
-
-    return null;
-
-
-
-  }
-
-
-
-
-
-
-
-  const number =
-
-
-
-    Number(
-
-
-
-      value
-
-
-
-    );
-
-
-
-
-
-
-
-  return (
-
-
-
-    Number.isFinite(
-
-
-
-      number
-
-
-
-    )
-
-
-
-    &&
-
-
-
-    number >= 0
-
-
-
-  )
-
-
-
-    ? number
-
-
-
-    : null;
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-function validDateOrBlank_(
-
-
-
-  value
-
-
-
-) {
-
-
-
-
-
-
-
-  if (!value) {
-
-
-
-
-
-
-
-    return '';
-
-
-
-  }
-
-
-
-
-
-
-
-  const date =
-
-
-
-    value instanceof Date
-
-
-
-
-
-
-
-      ? value
-
-
-
-
-
-
-
-      : new Date(
-
-
-
-          value
-
-
-
-        );
-
-
-
-
-
-
-
-  return (
-
-
-
-    date instanceof Date
-
-
-
-    &&
-
-
-
-    !isNaN(
-
-
-
-      date.getTime()
-
-
-
-    )
-
-
-
-  )
-
-
-
-    ? date
-
-
-
-    : '';
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-function buildMarketCompNote_(
-
-
-
-  query,
-
-
-
-  categoryId
-
-
-
-) {
-
-
-
-
-
-
-
-  const parts =
-
-
-
-    [];
-
-
-
-
-
-
-
-  if (query) {
-
-
-
-
-
-
-
-    parts.push(
-
-
-
-      'query=' +
-
-
-
-      query
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-  if (categoryId) {
-
-
-
-
-
-
-
-    parts.push(
-
-
-
-      'categoryId=' +
-
-
-
-      categoryId
-
-
-
-    );
-
-
-
-  }
-
-
-
-
-
-
-
-  return parts.join(
-
-
-
-    ' / '
-
-
-
-  );
-
-
-
-}
-
-
-
-
-
-
-
-
-
-
-
-// ============================================================
-
-
-
-// JSON
-
-
-
-// ============================================================
-
-
-
-
-
-
-
-function jsonResponse_(obj) {
-
-
-
-
-
-
-
-  return ContentService
-
-
-
-    .createTextOutput(
-
-
-
-      JSON.stringify(obj)
-
-
-
-    )
-
-
-
-    .setMimeType(
-
-
-
-      ContentService.MimeType.JSON
-
-
-
-    );
-
-
-
-}
-
-
 // ============================================================
 // 利益商品探索AI Historical Backfill
 //
-// 仕入URL（Mercari / Yahoo現行出品）と
-// 相場URL（Mercari売切 / Yahoo終了180日間）を同じDB商品へ紐づける。
+// 商品マスター / 利益商品探索AI
+//   ↓
+// market-ingest: getHistoricalBackfillTargets
+//   ↓
+// Mercari「売り切れ × 新着順」 + Yahooオークション「終了180日間 × 落札済み」
+//   ↓
+// 過去実売分布 + Historical Market Score
+//   ↓
+// market-ingest: upsertHistoricalBackfill
+//   ↓
+// 利益商品探索AI Y:AH
+//
+// このファイルは「売れた側（相場・需要）」を埋める。
+// 現行出品の仕入れ側（Mercari / Yahoo）は別工程で同じDB商品へ結合する。
 // ============================================================
 
-function getHistoricalBackfillTargets_(ss, body) {
-  const exploreSheet = ss.getSheetByName(MARKET_INGEST.HISTORICAL_SHEET_NAME);
-  const masterSheet = ss.getSheetByName(MARKET_INGEST.MASTER_SHEET_NAME);
+const INGEST_URL = process.env.MARKET_INGEST_URL;
+const INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
 
-  if (!exploreSheet) {
-    return { ok: false, action: 'getHistoricalBackfillTargets', error: '利益商品探索AIが見つかりません' };
+const BATCH_LIMIT = positiveInt_(
+  process.env.HISTORICAL_BATCH_LIMIT,
+  5,
+  1,
+  10
+);
+
+const MAX_SOLD_ITEMS = positiveInt_(
+  process.env.HISTORICAL_MAX_SOLD_ITEMS,
+  50,
+  1,
+  50
+);
+
+const MAX_MERCARI_SOLD_ITEMS = positiveInt_(
+  process.env.HISTORICAL_MAX_MERCARI_SOLD_ITEMS,
+  50,
+  1,
+  50
+);
+
+const PAGE_TIMEOUT_MS = positiveInt_(
+  process.env.HISTORICAL_PAGE_TIMEOUT_MS,
+  60000,
+  10000,
+  120000
+);
+
+const BETWEEN_TARGETS_MS = positiveInt_(
+  process.env.HISTORICAL_BETWEEN_TARGETS_MS,
+  1500,
+  0,
+  10000
+);
+
+const FORCE =
+  String(process.env.HISTORICAL_FORCE || '')
+    .trim()
+    .toLowerCase() === 'true';
+
+const DRY_RUN =
+  String(process.env.HISTORICAL_DRY_RUN || '')
+    .trim()
+    .toLowerCase() === 'true';
+
+const APPS_SCRIPT_MAX_ATTEMPTS = 5;
+const APPS_SCRIPT_RETRY_DELAYS_MS = [
+  0,
+  2500,
+  6000,
+  12000,
+  20000
+];
+
+// ============================================================
+// 共通
+// ============================================================
+
+function sleep_(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function positiveInt_(value, fallback, min, max) {
+  const n = Number(value);
+
+  if (!Number.isInteger(n)) {
+    return fallback;
   }
 
-  if (!masterSheet) {
-    return { ok: false, action: 'getHistoricalBackfillTargets', error: '商品マスターが見つかりません' };
+  return Math.max(min, Math.min(max, n));
+}
+
+function clamp_(value, min = 0, max = 1) {
+  const n = Number(value);
+
+  if (!Number.isFinite(n)) {
+    return min;
   }
 
-  const headerRow = 5;
-  const exploreLastRow = exploreSheet.getLastRow();
+  return Math.max(min, Math.min(max, n));
+}
 
-  if (exploreLastRow <= headerRow) {
-    return { ok: true, action: 'getHistoricalBackfillTargets', count: 0, remaining: 0, targets: [] };
+function yen_(value) {
+  const n = Number(value || 0);
+
+  return Number.isFinite(n)
+    ? `¥${Math.round(n).toLocaleString('ja-JP')}`
+    : '¥0';
+}
+
+function isRetryableAppsScriptStatus_(status) {
+  return [
+    404,
+    408,
+    425,
+    429,
+    500,
+    502,
+    503,
+    504
+  ].includes(Number(status));
+}
+
+function looksLikeAppsScriptHtml_(text, contentType) {
+  const type = String(contentType || '').toLowerCase();
+  const body = String(text || '').trim();
+
+  return (
+    type.includes('text/html') ||
+    /^<!doctype\s+html/i.test(body) ||
+    /^<html/i.test(body)
+  );
+}
+
+async function postAppsScriptJson_(payload, label) {
+  let lastError = null;
+
+  for (
+    let attempt = 1;
+    attempt <= APPS_SCRIPT_MAX_ATTEMPTS;
+    attempt++
+  ) {
+    const delayMs = Number(
+      APPS_SCRIPT_RETRY_DELAYS_MS[attempt - 1] || 0
+    );
+
+    if (delayMs > 0) {
+      console.warn(`[${label}] retry wait: ${delayMs}ms`);
+      await sleep_(delayMs);
+    }
+
+    console.log(`[${label}] Attempt: ${attempt}/${APPS_SCRIPT_MAX_ATTEMPTS}`);
+
+    let response;
+
+    try {
+      response = await fetch(
+        INGEST_URL,
+        {
+          method: 'POST',
+          redirect: 'follow',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        }
+      );
+    } catch (error) {
+      lastError = new Error(
+        `${label}通信失敗: ${
+          error && error.message
+            ? error.message
+            : String(error)
+        }`
+      );
+
+      if (attempt < APPS_SCRIPT_MAX_ATTEMPTS) {
+        continue;
+      }
+
+      throw lastError;
+    }
+
+    const text = await response.text();
+    const contentType = response.headers.get('content-type') || '';
+
+    if (!response.ok) {
+      lastError = new Error(
+        `${label} HTTP失敗: ${response.status}`
+      );
+
+      if (
+        isRetryableAppsScriptStatus_(response.status) &&
+        attempt < APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+        continue;
+      }
+
+      throw lastError;
+    }
+
+    let result;
+
+    try {
+      result = JSON.parse(text);
+    } catch (error) {
+      lastError = new Error(
+        `${label}応答がJSONではありません`
+      );
+
+      const retryableBody =
+        looksLikeAppsScriptHtml_(text, contentType) ||
+        !String(contentType).toLowerCase().includes('json');
+
+      if (
+        retryableBody &&
+        attempt < APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+        continue;
+      }
+
+      console.log(`[${label}] Response head:`, text.slice(0, 1000));
+      throw lastError;
+    }
+
+    if (result.ok !== true) {
+      const errorText = JSON.stringify(result);
+      lastError = new Error(`${label}側エラー: ${errorText}`);
+
+      // market-ingest の write lock 競合は一時エラーとして再試行する。
+      if (
+        result.error === 'busy' &&
+        attempt < APPS_SCRIPT_MAX_ATTEMPTS
+      ) {
+        continue;
+      }
+
+      throw lastError;
+    }
+
+    return result;
   }
 
-  const exploreColumnCount = Math.max(exploreSheet.getLastColumn(), 34);
-  const exploreHeaders = exploreSheet
-    .getRange(headerRow, 1, 1, exploreColumnCount)
-    .getValues()[0]
-    .map(value => String(value || '').trim());
+  throw (
+    lastError ||
+    new Error(`${label} Apps Script通信に失敗しました`)
+  );
+}
 
-  const requiredExploreHeaders = [
-    'DB商品ID', '優先度', 'ブランド', 'カテゴリ', '商品',
-    'Exploration Priority', '仕入URL_Mercari', '仕入URL_Yahoo',
-    '相場URL_Yahoo180', '相場URL_Mercari売切', '過去市場状態'
+// ============================================================
+// market-ingest
+// ============================================================
+
+async function getTargets_() {
+  return postAppsScriptJson_(
+    {
+      secret: INGEST_SECRET,
+      action: 'getHistoricalBackfillTargets',
+      limit: BATCH_LIMIT,
+      force: FORCE
+    },
+    'Historical targets'
+  );
+}
+
+async function saveSummary_(target, summary) {
+  if (DRY_RUN) {
+    console.log(
+      `[DRY RUN] 保存スキップ ${target.dbItemId}:`,
+      JSON.stringify(summary)
+    );
+    return { ok: true, dryRun: true };
+  }
+
+  return postAppsScriptJson_(
+    {
+      secret: INGEST_SECRET,
+      action: 'upsertHistoricalBackfill',
+      dbItemId: target.dbItemId,
+      summary
+    },
+    `Historical save ${target.dbItemId}`
+  );
+}
+
+// ============================================================
+// Mercari売り切れ検索
+// ============================================================
+
+function normalizeMercariSoldUrl_(rawUrl) {
+  let url;
+
+  try {
+    url = new URL(String(rawUrl || '').trim());
+  } catch (error) {
+    throw new Error('相場URL_Mercari売切 が不正です');
+  }
+
+  if (
+    url.origin !== 'https://jp.mercari.com' ||
+    url.pathname !== '/search'
+  ) {
+    throw new Error('相場URL_Mercari売切 はMercari検索URLではありません');
+  }
+
+  // 4市場版 Apps Script のURLに加え、実行時にも売り切れ・新着順を固定する。
+  url.searchParams.set('status', 'sold_out');
+  url.searchParams.set('sort', 'created_time');
+  url.searchParams.set('order', 'desc');
+
+  return url.toString();
+}
+
+function parseMercariItemUrl_(href) {
+  try {
+    const url = new URL(href, 'https://jp.mercari.com');
+    const normal = url.pathname.match(/^\/item\/(m\d+)/i);
+
+    if (normal) {
+      return {
+        itemId: normal[1],
+        url: `https://jp.mercari.com/item/${normal[1]}`
+      };
+    }
+
+    const shop = url.pathname.match(/^\/shops\/product\/([A-Za-z0-9_-]+)/i);
+
+    if (shop) {
+      return {
+        itemId: `shops:${shop[1]}`,
+        url: `https://jp.mercari.com/shops/product/${shop[1]}`
+      };
+    }
+
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function dismissMercariRegionGate_(page) {
+  const patterns = [
+    /日本の商品を見る/i,
+    /日本で続行/i,
+    /日本で見る/i,
+    /^続ける$/i,
+    /^Continue$/i
   ];
 
-  const missingExploreHeaders = requiredExploreHeaders.filter(name => exploreHeaders.indexOf(name) < 0);
+  for (const pattern of patterns) {
+    try {
+      const button = page.getByRole('button', { name: pattern }).first();
 
-  if (missingExploreHeaders.length > 0) {
-    return {
-      ok: false,
-      action: 'getHistoricalBackfillTargets',
-      error: '利益商品探索AIヘッダー不足: ' + missingExploreHeaders.join(', ')
-    };
+      if (await button.isVisible({ timeout: 700 })) {
+        await button.click();
+        await page.waitForTimeout(1500);
+        console.log('Mercari地域確認を処理しました');
+        return;
+      }
+    } catch (error) {
+      // 地域確認が表示されない場合はそのまま続ける。
+    }
+  }
+}
+
+async function loadMercariListings_(page) {
+  for (let i = 0; i < 6; i++) {
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 1.5);
+    });
+    await page.waitForTimeout(700);
   }
 
-  const eIndex = {};
-  exploreHeaders.forEach((name, index) => {
-    if (name) eIndex[name] = index;
+  await page.evaluate(() => {
+    window.scrollTo(0, 0);
   });
+}
 
-  const exploreRows = exploreSheet
-    .getRange(headerRow + 1, 1, exploreLastRow - headerRow, exploreColumnCount)
-    .getValues();
+async function extractMercariSoldItems_(page, limit) {
+  const raw = await page.evaluate(() => {
+    const yenRegex = /[¥￥]\s*([\d,]+)/;
+    const anchors = Array.from(
+      document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      )
+    );
+    const results = [];
 
-  const masterValues = masterSheet
-    .getRange(1, 1, masterSheet.getLastRow(), masterSheet.getLastColumn())
-    .getValues();
+    for (const anchor of anchors) {
+      const href = anchor.href || anchor.getAttribute('href') || '';
 
-  const masterHeaders = masterValues[0].map(value => String(value || '').trim());
-  const mIndex = {};
-  masterHeaders.forEach((name, index) => {
-    if (name) mIndex[name] = index;
-  });
+      if (!href) {
+        continue;
+      }
 
-  const getOptionalMasterText = (row, header) => {
-    const column = mIndex[header];
-    return column === undefined
-      ? ''
-      : String(row[column] || '').replace(/\s+/g, ' ').trim();
-  };
+      let node = anchor;
+      let cardText = '';
 
-  const requiredMasterHeaders = ['商品ID', '検索キーワード', '通常仕入上限', '採用想定売価'];
-  const missingMasterHeaders = requiredMasterHeaders.filter(name => mIndex[name] === undefined);
+      for (let depth = 0; depth < 7 && node; depth++) {
+        const text = String(node.innerText || '')
+          .replace(/\s+/g, ' ')
+          .trim();
 
-  if (missingMasterHeaders.length > 0) {
-    return {
-      ok: false,
-      action: 'getHistoricalBackfillTargets',
-      error: '商品マスターヘッダー不足: ' + missingMasterHeaders.join(', ')
-    };
-  }
+        if (yenRegex.test(text) && text.length < 1000) {
+          cardText = text;
+          break;
+        }
 
-  const masterMap = {};
-  masterValues.slice(1).forEach(row => {
-    const dbItemId = String(row[mIndex['商品ID']] || '').trim();
-    if (!dbItemId) return;
+        node = node.parentElement;
+      }
 
-    masterMap[dbItemId] = {
-      searchKeyword: String(row[mIndex['検索キーワード']] || '').replace(/\s+/g, ' ').trim(),
-      normalBuyLimit: positiveNumberOrZero_(row[mIndex['通常仕入上限']]),
-      adoptedSalePrice: positiveNumberOrZero_(row[mIndex['採用想定売価']]),
-      brand: getOptionalMasterText(row, 'ブランド/メーカー'),
-      productName: getOptionalMasterText(row, '商品名'),
-      subCategory: getOptionalMasterText(row, '商品サブカテゴリ'),
-      lineModel: getOptionalMasterText(row, 'ライン/モデル'),
-      keywordAliases: getOptionalMasterText(row, 'キーワード/別名'),
-      highValue: getOptionalMasterText(row, '高値要素')
-    };
-  });
+      const priceMatch = cardText.match(yenRegex);
 
-  const force = !!(body && body.force === true);
-  const requestedLimit = Number(body && body.limit || 3);
-  const limit = Math.max(1, Math.min(Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 3, 10));
+      if (!priceMatch) {
+        continue;
+      }
 
-  const candidates = [];
+      const price = Number(priceMatch[1].replace(/,/g, ''));
 
-  exploreRows.forEach((row, index) => {
-    const dbItemId = String(row[eIndex['DB商品ID']] || '').trim();
-    if (!dbItemId) return;
+      if (!price) {
+        continue;
+      }
 
-    const historicalState = String(row[eIndex['過去市場状態']] || '').trim();
+      let title = String(anchor.getAttribute('aria-label') || '').trim();
 
-    if (!force && (historicalState === '取得済' || historicalState === '0件')) {
-      return;
+      if (!title) {
+        const image = anchor.querySelector('img');
+        title = image ? String(image.getAttribute('alt') || '').trim() : '';
+      }
+
+      if (!title) {
+        title = String(anchor.innerText || '')
+          .replace(/[¥￥]\s*[\d,]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      if (!title && cardText) {
+        title = cardText
+          .replace(/[¥￥]\s*[\d,]+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      if (!title) {
+        continue;
+      }
+
+      results.push({ href, title, price });
     }
 
-    const master = masterMap[dbItemId] || {};
-    const brand = String(row[eIndex['ブランド']] || '').trim();
-    const category = String(row[eIndex['カテゴリ']] || '').trim();
-    const product = String(row[eIndex['商品']] || '').trim();
-    const searchKeyword = String(master.searchKeyword || [brand, product].filter(Boolean).join(' '))
-      .replace(/\s+/g, ' ')
-      .trim();
-    const normalBuyLimit = positiveNumberOrZero_(master.normalBuyLimit);
-
-    const mercariBuyUrl = String(
-      row[eIndex['仕入URL_Mercari']] || buildHistoricalMercariBuyUrl_(searchKeyword, normalBuyLimit)
-    ).trim();
-
-    const yahooBuyUrl = String(
-      row[eIndex['仕入URL_Yahoo']] || buildHistoricalYahooBuyUrl_(searchKeyword, normalBuyLimit)
-    ).trim();
-
-    const yahooHistoricalUrl = String(
-      row[eIndex['相場URL_Yahoo180']] || buildHistoricalYahooClosedUrl_(searchKeyword)
-    ).trim();
-
-    const mercariHistoricalUrl = String(
-      row[eIndex['相場URL_Mercari売切']] || buildHistoricalMercariSoldUrl_(searchKeyword)
-    ).trim();
-
-    candidates.push({
-      rowNumber: headerRow + 1 + index,
-      dbItemId,
-      priority: String(row[eIndex['優先度']] || '').trim(),
-      brand,
-      category,
-      product,
-      masterBrand: master.brand || '',
-      masterProductName: master.productName || '',
-      masterSubCategory: master.subCategory || '',
-      lineModel: master.lineModel || '',
-      keywordAliases: master.keywordAliases || '',
-      highValue: master.highValue || '',
-      searchKeyword,
-      normalBuyLimit,
-      adoptedSalePrice: positiveNumberOrZero_(master.adoptedSalePrice),
-      explorationPriority: Number(row[eIndex['Exploration Priority']] || 0),
-      mercariBuyUrl,
-      yahooBuyUrl,
-      mercariHistoricalUrl,
-      yahooHistoricalUrl,
-      historicalState
-    });
+    return results;
   });
 
-  candidates.sort((a, b) => {
-    const diff = Number(b.explorationPriority || 0) - Number(a.explorationPriority || 0);
-    if (diff !== 0) return diff;
-    return String(a.dbItemId).localeCompare(String(b.dbItemId), 'ja');
-  });
+  const map = new Map();
+
+  for (const row of raw) {
+    const parsed = parseMercariItemUrl_(row.href);
+
+    if (!parsed) {
+      continue;
+    }
+
+    const existing = map.get(parsed.itemId);
+
+    if (!existing) {
+      map.set(parsed.itemId, {
+        itemId: parsed.itemId,
+        url: parsed.url,
+        title: row.title,
+        price: row.price
+      });
+      continue;
+    }
+
+    if (row.title.length > existing.title.length) {
+      existing.title = row.title;
+    }
+
+    if (row.price) {
+      existing.price = row.price;
+    }
+  }
+
+  return Array.from(map.values()).slice(0, limit);
+}
+
+// ============================================================
+// DB商品との類似度
+// ============================================================
+
+function normalizeMatchText_(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('ja-JP')
+    .replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+function matchTerms_(value) {
+  const text = String(value || '').normalize('NFKC').toLocaleLowerCase('ja-JP');
+  const terms = text.match(/[a-z0-9]+|[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\u30fc]+/gu) || [];
+
+  return Array.from(new Set(
+    terms
+      .map(term => normalizeMatchText_(term))
+      .filter(term => term.length >= 2)
+  ));
+}
+
+function matchGroup_(title, value) {
+  const terms = matchTerms_(value);
+
+  if (!terms.length) {
+    return { terms: [], matched: false, ratio: 0 };
+  }
+
+  const titleText = normalizeMatchText_(title);
+  let hitWeight = 0;
+  let matchedTerms = 0;
+
+  for (const term of terms) {
+    if (titleText.includes(term)) {
+      hitWeight += 1;
+      matchedTerms++;
+      continue;
+    }
+
+    // Japanese product labels often contain a more specific phrase than the
+    // listing title. Allow one shared 3-character phrase at half weight;
+    // brand matching remains exact.
+    if (/[^\u0000-\u007f]/.test(term) && term.length >= 5) {
+      const grams = [];
+
+      for (let i = 0; i <= term.length - 3; i++) {
+        grams.push(term.slice(i, i + 3));
+      }
+
+      if (grams.some(gram => titleText.includes(gram))) {
+        hitWeight += 0.5;
+        matchedTerms++;
+      }
+    }
+  }
 
   return {
-    ok: true,
-    action: 'getHistoricalBackfillTargets',
-    count: Math.min(candidates.length, limit),
-    remaining: candidates.length,
-    targets: candidates.slice(0, limit)
+    terms,
+    matched: matchedTerms > 0,
+    ratio: hitWeight / terms.length
   };
 }
 
+function splitMatchAlternatives_(value) {
+  return String(value || '')
+    .normalize('NFKC')
+    .split(/[\/|,、;；，]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+}
 
-function upsertHistoricalBackfill_(ss, body) {
-  const sheet = ss.getSheetByName(MARKET_INGEST.HISTORICAL_SHEET_NAME);
+function uniqueMatchPhrases_(values) {
+  const seen = new Set();
+  const result = [];
 
-  if (!sheet) {
-    return jsonResponse_({ ok: false, action: 'upsertHistoricalBackfill', error: '利益商品探索AIが見つかりません' });
+  for (const value of values) {
+    const phrase = String(value || '').trim();
+    const normalized = normalizeMatchText_(phrase);
+
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    result.push(phrase);
   }
 
-  const dbItemId = String(body && body.dbItemId || '').trim();
+  return result;
+}
 
-  if (!dbItemId) {
-    return jsonResponse_({ ok: false, action: 'upsertHistoricalBackfill', error: 'dbItemId required' });
-  }
+function brandMatchPhrases_(value) {
+  const phrases = splitMatchAlternatives_(value);
+  const normalized = normalizeMatchText_(phrases.join(' '));
+  const equivalences = [
+    { keys: ['burberry', 'バーバリー'], values: ['BURBERRY', 'バーバリー'] },
+    { keys: ['balmain', 'バルマン'], values: ['BALMAIN', 'バルマン'] },
+    { keys: ['hermes', 'エルメス'], values: ['HERMES', 'エルメス'] }
+  ];
 
-  const summary = body && body.summary && typeof body.summary === 'object' ? body.summary : {};
-  const headerRow = 5;
-  const lastRow = sheet.getLastRow();
-
-  if (lastRow <= headerRow) {
-    return jsonResponse_({ ok: false, action: 'upsertHistoricalBackfill', error: '利益商品探索AIにデータ行がありません' });
-  }
-
-  const ids = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, 1).getValues();
-  let targetRow = 0;
-
-  for (let i = 0; i < ids.length; i++) {
-    if (String(ids[i][0] || '').trim() === dbItemId) {
-      targetRow = headerRow + 1 + i;
-      break;
+  for (const entry of equivalences) {
+    if (entry.keys.some(key => normalized.includes(normalizeMatchText_(key)))) {
+      phrases.push(...entry.values);
     }
   }
 
-  if (!targetRow) {
-    return jsonResponse_({
-      ok: false,
-      action: 'upsertHistoricalBackfill',
-      error: 'DB商品IDが利益商品探索AIにありません: ' + dbItemId
-    });
+  return uniqueMatchPhrases_(phrases);
+}
+
+function strictPhrasePresent_(title, phrase) {
+  const normalizedPhrase = normalizeMatchText_(phrase);
+
+  if (!normalizedPhrase) {
+    return false;
   }
 
-  const soldCount = Math.max(0, Math.floor(positiveNumberOrZero_(summary.soldCount)));
-  const sampleCount = Math.max(0, Math.floor(positiveNumberOrZero_(summary.sampleCount)));
-  const minPrice = positiveNumberOrZero_(summary.minPrice);
-  const q25Price = positiveNumberOrZero_(summary.q25Price);
-  const medianPrice = positiveNumberOrZero_(summary.medianPrice);
-  const q75Price = positiveNumberOrZero_(summary.q75Price);
-  const maxPrice = positiveNumberOrZero_(summary.maxPrice);
-  const historicalScore = Math.max(0, Math.min(100, Number(summary.historicalScore || 0)));
-  const state = String(summary.state || ((soldCount > 0 || sampleCount > 0) ? '取得済' : '0件')).trim();
-  const judgement = String(summary.judgement || '').trim();
-  const updatedAt = new Date();
+  const rawTitle = String(title || '')
+    .normalize('NFKC')
+    .toLocaleLowerCase('ja-JP');
 
-  // ----------------------------------------------------------
-  // 市場別Historicalデータ
-  // AI:AN
-  // AI Mercari売切件数
-  // AJ Mercari売切中央値
-  // AK Yahoo落札件数
-  // AL Yahoo落札中央値
-  // AM 市場間中央値差率
-  // AN 相場ソース判定
-  //
-  // 旧historical-backfill.jsからの送信でも壊れないよう、
-  // 未送信項目は空欄として保存する。
-  // ----------------------------------------------------------
-  const mercariSoldCount = Math.max(0, Math.floor(positiveNumberOrZero_(summary.mercariSoldCount)));
-  const mercariMedianPrice = positiveNumberOrZero_(summary.mercariMedianPrice);
-  const yahooSoldCount = Math.max(0, Math.floor(positiveNumberOrZero_(summary.yahooSoldCount)));
-  const yahooMedianPrice = positiveNumberOrZero_(summary.yahooMedianPrice);
-  const marketMedianGapRate = Number(summary.marketMedianGapRate);
-  const sourceJudgement = String(summary.sourceJudgement || '').trim();
+  // Avoid accepting English feature words inside unrelated longer words.
+  if (/^[a-z0-9]+$/i.test(String(phrase || '').trim())) {
+    const escaped = normalizedPhrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i').test(rawTitle);
+  }
 
-  // Y:AH = 統合Historical 10列
-  sheet.getRange(targetRow, 25, 1, 10).setValues([[
-    soldCount,
-    minPrice || '',
-    q25Price || '',
-    medianPrice || '',
-    q75Price || '',
-    maxPrice || '',
-    updatedAt,
-    state,
-    historicalScore,
+  return normalizeMatchText_(title).includes(normalizedPhrase);
+}
+
+function expandKnownFeaturePhrases_(value) {
+  const original = splitMatchAlternatives_(value);
+  const normalized = normalizeMatchText_(original.join(' '));
+  const phrases = [...original];
+
+  if (/(horse|horsehide|ホース|馬革)/.test(normalized)) {
+    phrases.push('馬革', 'ホース', 'ホースハイド', 'horsehide', 'horse leather');
+  }
+  if (/(deer|deerskin|ディア|鹿革)/.test(normalized)) {
+    phrases.push('鹿革', 'ディア', 'ディアスキン', 'deerskin', 'deer leather');
+  }
+  if (/(buffalo|バッファロー|水牛)/.test(normalized)) {
+    phrases.push('水牛革', 'バッファロー', 'buffalo', 'buffalo leather');
+  }
+  if (/(cashmere|カシミヤ|カシミア)/.test(normalized)) {
+    phrases.push('カシミヤ', 'カシミア', 'cashmere');
+  }
+  if (/(mouton|ムートン|sheepskin|shearling|シープスキン)/.test(normalized)) {
+    phrases.push('ムートン', 'mouton', 'シープスキン', 'sheepskin', 'shearling');
+  }
+  if (/(london|ロンドン)/.test(normalized)) {
+    phrases.push('LONDON', 'ロンドン');
+  }
+  if (/(chester|チェスター)/.test(normalized)) {
+    phrases.push('chester', 'chesterfield', 'チェスター');
+  }
+
+  return uniqueMatchPhrases_(phrases);
+}
+
+const MODEL_CUES_ = [
+  {
+    id: 'ライン/モデル:ロンドン',
+    pattern: /london|ロンドン/,
+    remove: ['london', 'ロンドン'],
+    alternatives: ['LONDON', 'ロンドン']
+  },
+  {
+    id: 'ライン/モデル:2ボタン',
+    pattern: /2b|2釦|2ボタン|2つボタン|twobutton/,
+    remove: ['2b', '2釦', '2ボタン', '2つボタン', 'twobutton'],
+    alternatives: ['2B', '2釦', '2ボタン', '2つボタン', '二つボタン', 'two button']
+  },
+  {
+    id: 'ライン/モデル:ロング',
+    pattern: /ロング|long/,
+    remove: ['ロング', 'long'],
+    alternatives: ['ロング', 'long', '丈長']
+  },
+  {
+    id: 'ライン/モデル:ダブル',
+    pattern: /ダブル|double/,
+    remove: ['ダブル', 'double'],
+    alternatives: ['ダブル', 'double', 'doublebreasted']
+  },
+  {
+    id: 'ライン/モデル:ムートン',
+    pattern: /ムートン|mouton|sheepskin|shearling/,
+    remove: ['ムートン', 'mouton', 'sheepskin', 'shearling'],
+    alternatives: ['ムートン', 'mouton', 'シープスキン', 'sheepskin', 'shearling']
+  }
+];
+
+function detectGender_(value) {
+  const text = String(value || '').normalize('NFKC').toLocaleLowerCase('ja-JP');
+
+  if (/(レディース|婦人|女性|\b(women|woman|ladies|female)\b)/i.test(text)) {
+    return 'women';
+  }
+  if (/(メンズ|紳士|男性|\b(men|mens|male)\b)/i.test(text)) {
+    return 'men';
+  }
+
+  return '';
+}
+
+function addRequiredFeature_(groups, name, alternatives) {
+  const phrases = uniqueMatchPhrases_(alternatives);
+
+  if (!phrases.length) {
+    return;
+  }
+
+  const signature = phrases
+    .map(normalizeMatchText_)
+    .sort()
+    .join('|');
+
+  if (groups.some(group => group.signature === signature)) {
+    return;
+  }
+
+  groups.push({ name, alternatives: phrases, signature });
+}
+
+function buildRequiredIdentityFeatures_(target) {
+  const groups = [];
+  const modelText = String(target.lineModel || '').trim();
+  const highValueText = String(target.highValue || '').trim();
+  const featureDescription = normalizeMatchText_(`${modelText} ${highValueText}`);
+  const rareLeather = /(希少革|希少素材|レアレザー|rareleather)/.test(featureDescription);
+
+  if (rareLeather) {
+    const aliasPhrases = splitMatchAlternatives_(target.keywordAliases || target.aliases)
+      .flatMap(expandKnownFeaturePhrases_)
+      .filter(phrase => /(horse|ホース|馬革|deer|ディア|鹿革|buffalo|バッファロー|水牛)/.test(normalizeMatchText_(phrase)));
+    const rareLeatherPhrases = aliasPhrases.length
+      ? aliasPhrases
+      : [
+          '馬革', 'ホース', 'ホースハイド', 'horsehide',
+          '鹿革', 'ディア', 'ディアスキン', 'deerskin',
+          '水牛革', 'バッファロー', 'buffalo'
+        ];
+
+    addRequiredFeature_(groups, '高値要素:希少革の素材', rareLeatherPhrases);
+  }
+
+  for (const cue of MODEL_CUES_) {
+    if (cue.pattern.test(featureDescription)) {
+      addRequiredFeature_(groups, cue.id, cue.alternatives);
+    }
+  }
+
+  const genericHighValue = /^(高値|希少|希少革|希少素材|レア|レアレザー|限定|人気|定番|プレミア)$/;
+  if (highValueText && !rareLeather) {
+    for (const value of splitMatchAlternatives_(highValueText)) {
+      const normalized = normalizeMatchText_(value);
+
+      if (!normalized || genericHighValue.test(normalized)) {
+        continue;
+      }
+
+      const known = expandKnownFeaturePhrases_(value);
+      addRequiredFeature_(groups, `高値要素:${value}`, known);
+    }
+  }
+
+  if (modelText) {
+    let residual = normalizeMatchText_(modelText);
+    const identityPhrases = [
+      ...brandMatchPhrases_([target.brand, target.masterBrand].filter(Boolean).join(' ')),
+      target.product,
+      target.masterProductName,
+      target.category,
+      target.masterSubCategory
+    ].filter(Boolean);
+
+    for (const phrase of identityPhrases) {
+      const normalized = normalizeMatchText_(phrase);
+      if (normalized.length >= 2) {
+        residual = residual.split(normalized).join('');
+      }
+    }
+
+    for (const cue of MODEL_CUES_) {
+      for (const phrase of cue.remove) {
+        residual = residual.split(normalizeMatchText_(phrase)).join('');
+      }
+    }
+
+    residual = residual.replace(/希少革|希少素材|レアレザー|rareleather|ライン|モデル|line|model/g, '');
+
+    for (const term of matchTerms_(residual)) {
+      const normalized = normalizeMatchText_(term);
+      if (normalized.length < 2 || genericHighValue.test(normalized)) {
+        continue;
+      }
+
+      addRequiredFeature_(groups, `ライン/モデル:${term}`, expandKnownFeaturePhrases_(term));
+    }
+  }
+
+  return groups.map(({ name, alternatives }) => ({ name, alternatives }));
+}
+
+function bestMatchGroup_(title, values) {
+  const groups = values
+    .filter(value => String(value || '').trim())
+    .map(value => matchGroup_(title, value))
+    .filter(group => group.terms.length)
+    .sort((a, b) => b.ratio - a.ratio);
+
+  return groups[0] || { terms: [], matched: false, ratio: 0 };
+}
+
+function scoreHistoricalTitleMatch_(target, title) {
+  const brandValues = [target.brand, target.masterBrand]
+    .filter(Boolean)
+    .flatMap(brandMatchPhrases_);
+  const brand = bestMatchGroup_(title, brandValues);
+  const product = bestMatchGroup_(title, [target.product, target.masterProductName]);
+  const category = bestMatchGroup_(title, [target.category, target.masterSubCategory]);
+  const keyword = matchGroup_(title, target.searchKeyword);
+
+  const hasBrand = brand.terms.length > 0;
+  const hasProduct = product.terms.length > 0;
+  const hasCategory = category.terms.length > 0;
+
+  const groups = [];
+  if (hasBrand) groups.push({ ratio: brand.ratio, weight: 0.45 });
+  if (hasProduct) groups.push({ ratio: product.ratio, weight: 0.40 });
+  if (hasCategory) groups.push({ ratio: category.ratio, weight: 0.15 });
+
+  if (!groups.length && keyword.terms.length) {
+    groups.push({ ratio: keyword.ratio, weight: 1 });
+  }
+
+  const totalWeight = groups.reduce((sum, group) => sum + group.weight, 0);
+  const score = totalWeight
+    ? groups.reduce((sum, group) => sum + group.ratio * group.weight, 0) / totalWeight
+    : 0;
+
+  const identityMatch = hasBrand
+    ? brand.matched && (product.matched || category.matched)
+    : hasProduct
+      ? product.matched || category.matched
+      : hasCategory
+        ? category.matched
+        : keyword.matched;
+
+  const targetGender = detectGender_(`${target.category || ''} ${target.masterSubCategory || ''}`);
+  const titleGender = detectGender_(title);
+  const genderMismatch = Boolean(targetGender && titleGender && targetGender !== titleGender);
+  const requiredFeatures = buildRequiredIdentityFeatures_(target);
+  const missingFeatures = requiredFeatures.filter(feature =>
+    !feature.alternatives.some(phrase => strictPhrasePresent_(title, phrase))
+  );
+  const reasons = [];
+
+  if (!identityMatch) reasons.push('ブランド・商品・カテゴリ不一致');
+  if (score < 0.55) reasons.push('一致スコア55未満');
+  if (genderMismatch) reasons.push('性別カテゴリ不一致');
+  for (const feature of missingFeatures) {
+    reasons.push(`必須特徴不足:${feature.name}`);
+  }
+
+  return {
+    accepted: reasons.length === 0,
+    score: Math.round(score * 100),
+    reasons,
+    matchedFeatures: requiredFeatures
+      .filter(feature => !missingFeatures.includes(feature))
+      .map(feature => feature.name)
+  };
+}
+
+function filterComparableItems_(target, items, marketLabel) {
+  const accepted = [];
+  let rejected = 0;
+  const reasonCounts = {};
+  const acceptedSamples = [];
+  const rejectedSamples = [];
+
+  for (const item of items) {
+    const match = scoreHistoricalTitleMatch_(target, item.title);
+
+    if (match.accepted) {
+      accepted.push({ ...item, matchScore: match.score, matchFeatures: match.matchedFeatures });
+      if (acceptedSamples.length < 3) {
+        acceptedSamples.push({ title: item.title, score: match.score, features: match.matchedFeatures });
+      }
+    } else {
+      rejected++;
+      for (const reason of match.reasons) {
+        reasonCounts[reason] = (reasonCounts[reason] || 0) + 1;
+      }
+      if (rejectedSamples.length < 3) {
+        rejectedSamples.push({ title: item.title, score: match.score, reasons: match.reasons });
+      }
+    }
+  }
+
+  console.log(`${marketLabel}類似商品:`, accepted.length, '/', items.length);
+  if (rejected) {
+    console.log(`${marketLabel}類似度不足で除外:`, rejected);
+  }
+  console.log(`${marketLabel}採用例:`, JSON.stringify(acceptedSamples));
+  console.log(`${marketLabel}除外理由:`, JSON.stringify(reasonCounts));
+  if (rejectedSamples.length) {
+    console.log(`${marketLabel}除外例:`, JSON.stringify(rejectedSamples));
+  }
+
+  return accepted;
+}
+
+// ============================================================
+// Yahoo終了180日間 parser
+// 既存 Market Comps の抽出ルールを基礎にしている。
+// ============================================================
+
+async function extractYahooClosedItems_(page, limit) {
+  return page.evaluate(
+    ({ limit }) => {
+      function clean(value) {
+        return String(value || '')
+          .replace(/\u00a0/g, ' ')
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      }
+
+      function absoluteUrl(href) {
+        try {
+          return new URL(href, location.href).href;
+        } catch (error) {
+          return '';
+        }
+      }
+
+      function findCard(anchor) {
+        let node = anchor;
+
+        for (let depth = 0; depth < 10; depth++) {
+          node = node.parentElement;
+
+          if (!node) {
+            break;
+          }
+
+          const text = clean(node.innerText);
+
+          if (
+            text.includes('落札') &&
+            text.includes('終了') &&
+            text.length <= 5000
+          ) {
+            return node;
+          }
+        }
+
+        return null;
+      }
+
+      function bestTitle(card, itemHref) {
+        const links = Array.from(card.querySelectorAll('a'));
+
+        const candidates = links
+          .filter(link => {
+            const href = absoluteUrl(link.getAttribute('href'));
+
+            return (
+              href &&
+              href.split('#')[0] === itemHref.split('#')[0]
+            );
+          })
+          .map(link =>
+            clean(
+              link.innerText ||
+              link.getAttribute('aria-label') ||
+              link.getAttribute('title')
+            )
+          )
+          .filter(text => text && text.length >= 4)
+          .sort((a, b) => b.length - a.length);
+
+        if (candidates.length) {
+          return candidates[0];
+        }
+
+        const heading = card.querySelector('h1,h2,h3,h4');
+        return heading ? clean(heading.innerText) : '';
+      }
+
+      const anchors = Array.from(
+        document.querySelectorAll('a[href*="/jp/auction/"]')
+      );
+
+      const seen = new Set();
+      const results = [];
+
+      for (const anchor of anchors) {
+        if (results.length >= limit) {
+          break;
+        }
+
+        const href = absoluteUrl(anchor.getAttribute('href'));
+
+        if (!href) {
+          continue;
+        }
+
+        const idMatch = href.match(/\/jp\/auction\/([^/?#]+)/);
+
+        if (!idMatch) {
+          continue;
+        }
+
+        const itemId = idMatch[1];
+
+        if (seen.has(itemId)) {
+          continue;
+        }
+
+        const card = findCard(anchor);
+
+        if (!card) {
+          continue;
+        }
+
+        const text = clean(card.innerText);
+        const priceMatch = text.match(/落札\s*([\d,]+)\s*円/);
+        const endMatch = text.match(
+          /(\d{1,2}\/\d{1,2})\s+(\d{1,2}:\d{2})\s*終了/
+        );
+
+        if (!priceMatch || !endMatch) {
+          continue;
+        }
+
+        const title = bestTitle(card, href);
+
+        if (!title) {
+          continue;
+        }
+
+        seen.add(itemId);
+
+        results.push({
+          itemId,
+          url: href.split('#')[0],
+          title,
+          price: Number(String(priceMatch[1]).replace(/,/g, '')) || 0,
+          endDateLabel: endMatch[1],
+          endTimeLabel: endMatch[2]
+        });
+      }
+
+      return results;
+    },
+    { limit }
+  );
+}
+
+// ============================================================
+// 集計 / Historical Market Score
+// ============================================================
+
+function quantile_(sortedValues, q) {
+  if (!sortedValues.length) {
+    return 0;
+  }
+
+  if (sortedValues.length === 1) {
+    return sortedValues[0];
+  }
+
+  const position = (sortedValues.length - 1) * q;
+  const base = Math.floor(position);
+  const rest = position - base;
+  const next = sortedValues[base + 1];
+
+  if (next === undefined) {
+    return sortedValues[base];
+  }
+
+  return (
+    sortedValues[base] +
+    rest * (next - sortedValues[base])
+  );
+}
+
+function buildHistoricalScore_(target, stats) {
+  const sampleCount = stats.sampleCount;
+  const medianPrice = stats.medianPrice;
+  const q25Price = stats.q25Price;
+  const q75Price = stats.q75Price;
+  const buyLimit = Number(target.normalBuyLimit || 0);
+  const adoptedSale = Number(target.adoptedSalePrice || 0);
+
+  if (
+    sampleCount <= 0 ||
+    medianPrice <= 0
+  ) {
+    return {
+      score: 0,
+      judgement: '過去実売0件・後回し'
+    };
+  }
+
+  // ① 実売量 25点
+  const volumeScore =
+    clamp_(sampleCount / 20) * 25;
+
+  // ② サンプル信頼度 10点
+  const sampleScore =
+    clamp_(sampleCount / 12) * 10;
+
+  // ③ 中央売価 ÷ 通常仕入上限 25点
+  // 通常仕入上限がDB側で利益条件を織り込んでいるため、
+  // ここでは「過去市場が仕入上限より十分上にあるか」を見る。
+  let medianSpreadScore = 0;
+
+  if (buyLimit > 0) {
+    const ratio = medianPrice / buyLimit;
+    medianSpreadScore =
+      clamp_((ratio - 1.0) / 1.5) * 25;
+  }
+
+  // ④ 25%値 ÷ 通常仕入上限 20点
+  // 中央値だけでなく、弱めに売れたゾーンでも利益余地が残るか。
+  let q25SpreadScore = 0;
+
+  if (buyLimit > 0 && q25Price > 0) {
+    const ratio = q25Price / buyLimit;
+    q25SpreadScore =
+      clamp_((ratio - 1.0) / 1.5) * 20;
+  }
+
+  // ⑤ 価格安定性 15点
+  // IQRが中央値に対して小さいほど安定。
+  const iqr = Math.max(0, q75Price - q25Price);
+  const iqrRatio = medianPrice > 0
+    ? iqr / medianPrice
+    : 1;
+  const stabilityScore =
+    clamp_(1 - (iqrRatio / 1.0)) * 15;
+
+  // ⑥ DB想定売価との整合 5点
+  // 過去中央値がDB想定の50%以上なら満点へ近づける。
+  let dbPlausibilityScore = 0;
+
+  if (adoptedSale > 0) {
+    const ratio = medianPrice / adoptedSale;
+    dbPlausibilityScore =
+      clamp_(ratio / 0.8) * 5;
+  }
+
+  const score = Math.round(
+    volumeScore +
+    sampleScore +
+    medianSpreadScore +
+    q25SpreadScore +
+    stabilityScore +
+    dbPlausibilityScore
+  );
+
+  let judgement;
+
+  if (score >= 70 && sampleCount >= 5) {
+    judgement = '過去市場強い・仕入側検証へ';
+  } else if (score >= 50 && sampleCount >= 3) {
+    judgement = '過去市場あり・要ライブ検証';
+  } else {
+    judgement = '過去市場弱い・優先度低';
+  }
+
+  return {
+    score,
     judgement
-  ]]);
+  };
+}
 
-  // AI:AN = 市場別Historical 6列
-  sheet.getRange(targetRow, 35, 1, 6).setValues([[
-    mercariSoldCount || '',
-    mercariMedianPrice || '',
-    yahooSoldCount || '',
-    yahooMedianPrice || '',
-    Number.isFinite(marketMedianGapRate) ? marketMedianGapRate : '',
-    sourceJudgement
-  ]]);
+function summarizeHistorical_(target, items) {
+  const prices = items
+    .map(item => Number(item.price || 0))
+    .filter(price => Number.isFinite(price) && price > 0)
+    .sort((a, b) => a - b);
 
-  return jsonResponse_({
-    ok: true,
-    action: 'upsertHistoricalBackfill',
-    dbItemId,
-    rowNumber: targetRow,
-    soldCount,
-    sampleCount,
-    historicalScore,
-    judgement,
-    state,
-    mercariSoldCount,
-    mercariMedianPrice,
-    yahooSoldCount,
-    yahooMedianPrice,
-    marketMedianGapRate: Number.isFinite(marketMedianGapRate) ? marketMedianGapRate : null,
-    sourceJudgement
+  if (!prices.length) {
+    return {
+      soldCount: 0,
+      sampleCount: 0,
+      minPrice: 0,
+      q25Price: 0,
+      medianPrice: 0,
+      q75Price: 0,
+      maxPrice: 0,
+      historicalScore: 0,
+      judgement: '過去実売0件・後回し',
+      state: '0件'
+    };
+  }
+
+  const stats = {
+    sampleCount: prices.length,
+    minPrice: prices[0],
+    q25Price: Math.round(quantile_(prices, 0.25)),
+    medianPrice: Math.round(quantile_(prices, 0.50)),
+    q75Price: Math.round(quantile_(prices, 0.75)),
+    maxPrice: prices[prices.length - 1]
+  };
+
+  const score = buildHistoricalScore_(target, stats);
+
+  return {
+    // 各市場で重複URLを除いた比較可能商品数の合計。
+    soldCount: prices.length,
+    sampleCount: prices.length,
+    minPrice: stats.minPrice,
+    q25Price: stats.q25Price,
+    medianPrice: stats.medianPrice,
+    q75Price: stats.q75Price,
+    maxPrice: stats.maxPrice,
+    historicalScore: score.score,
+    judgement: score.judgement,
+    state: '取得済'
+  };
+}
+
+function summarizeMarket_(items) {
+  const prices = items
+    .map(item => Number(item.price || 0))
+    .filter(price => Number.isFinite(price) && price > 0)
+    .sort((a, b) => a - b);
+
+  return {
+    count: prices.length,
+    medianPrice: prices.length
+      ? Math.round(quantile_(prices, 0.5))
+      : 0
+  };
+}
+
+function classifyMarketSources_(mercari, yahoo) {
+  if (mercari.count === 0 && yahoo.count === 0) {
+    return 'データ不足';
+  }
+
+  if (mercari.count === 0 || yahoo.count === 0) {
+    return '片市場のみ';
+  }
+
+  const gapRate = Math.abs(mercari.medianPrice - yahoo.medianPrice) /
+    Math.max(mercari.medianPrice, yahoo.medianPrice);
+
+  // 価格差35%以上は、商品混在・モデル差・状態差などを再確認する。
+  if (gapRate >= 0.35) {
+    return '市場差大';
+  }
+
+  const volumeRatio = Math.max(mercari.count, yahoo.count) /
+    Math.min(mercari.count, yahoo.count);
+
+  if (volumeRatio >= 1.5) {
+    return mercari.count > yahoo.count ? 'Mercari優勢' : 'Yahoo優勢';
+  }
+
+  return '両市場一致';
+}
+
+function summarizeTwoMarkets_(target, mercariItems, yahooItems, marketStatus) {
+  const mercari = summarizeMarket_(mercariItems);
+  const yahoo = summarizeMarket_(yahooItems);
+  const combined = summarizeHistorical_(target, [
+    ...mercariItems,
+    ...yahooItems
+  ]);
+
+  const hasBothMarketMedians =
+    mercari.medianPrice > 0 && yahoo.medianPrice > 0;
+  const marketMedianGapRate = hasBothMarketMedians
+    ? Math.abs(mercari.medianPrice - yahoo.medianPrice) /
+      Math.max(mercari.medianPrice, yahoo.medianPrice)
+    // upsertHistoricalBackfill_ treats a JSON null as zero. "NaN" converts to
+    // a non-finite number there, so the sheet leaves an unavailable gap blank.
+    : 'NaN';
+
+  const state = marketStatus.mercariSucceeded && marketStatus.yahooSucceeded
+    ? (combined.sampleCount > 0 ? '取得済' : '0件')
+    : '一部取得失敗';
+
+  return {
+    ...combined,
+    soldCount: mercari.count + yahoo.count,
+    sampleCount: mercari.count + yahoo.count,
+    mercariSoldCount: mercari.count,
+    mercariMedianPrice: mercari.medianPrice,
+    yahooSoldCount: yahoo.count,
+    yahooMedianPrice: yahoo.medianPrice,
+    marketMedianGapRate,
+    sourceJudgement: classifyMarketSources_(mercari, yahoo),
+    state
+  };
+}
+
+// ============================================================
+// 1商品
+// ============================================================
+
+async function runTarget_(page, target) {
+  if (!target.dbItemId) {
+    throw new Error('DB商品IDがありません');
+  }
+
+  let mercariUrl = '';
+  let mercariUrlError = '';
+  const yahooUrl = String(target.yahooHistoricalUrl || '').trim();
+  const marketErrors = [];
+
+  try {
+    mercariUrl = normalizeMercariSoldUrl_(target.mercariHistoricalUrl);
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    mercariUrlError = message;
+    console.error(`[${target.dbItemId}] Mercari売切 URL不正:`, message);
+  }
+
+  console.log('========================================');
+  console.log('DB商品ID:', target.dbItemId);
+  console.log('ブランド:', target.brand || '');
+  console.log('カテゴリ:', target.category || '');
+  console.log('商品:', target.product || '');
+  console.log('Exploration Priority:', target.explorationPriority || 0);
+  console.log('検索語:', target.searchKeyword || '');
+  console.log('仕入URL Mercari:', target.mercariBuyUrl || '');
+  console.log('仕入URL Yahoo:', target.yahooBuyUrl || '');
+  console.log('相場URL Mercari売切:', mercariUrl);
+  console.log('相場URL Yahoo180:', yahooUrl);
+
+  const mercariItems = [];
+  const yahooItems = [];
+  const marketStatus = {
+    mercariSucceeded: false,
+    yahooSucceeded: false
+  };
+
+  try {
+    if (!mercariUrl) {
+      throw new Error(mercariUrlError || '相場URL_Mercari売切 がありません');
+    }
+
+    const response = await page.goto(
+      mercariUrl,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_TIMEOUT_MS
+      }
+    );
+
+    if (!response) {
+      throw new Error('Mercari HTTPレスポンスなし');
+    }
+
+    const status = response.status();
+    console.log('Mercari HTTP:', status);
+
+    if (status < 200 || status >= 400) {
+      throw new Error(`Mercari HTTP ${status}`);
+    }
+
+    await dismissMercariRegionGate_(page);
+    await page.waitForSelector('body', { timeout: PAGE_TIMEOUT_MS });
+    await page.waitForTimeout(2200);
+    await loadMercariListings_(page);
+
+    const rawItems = await extractMercariSoldItems_(
+      page,
+      MAX_MERCARI_SOLD_ITEMS
+    );
+    const comparable = filterComparableItems_(target, rawItems, 'Mercari売切');
+    mercariItems.push(...comparable);
+    marketStatus.mercariSucceeded = true;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    marketErrors.push(`Mercari売切: ${message}`);
+    console.error(`[${target.dbItemId}] Mercari売切取得失敗:`, message);
+  }
+
+  try {
+    if (!yahooUrl) {
+      throw new Error('相場URL_Yahoo180 がありません');
+    }
+
+    const response = await page.goto(
+      yahooUrl,
+      {
+        waitUntil: 'domcontentloaded',
+        timeout: PAGE_TIMEOUT_MS
+      }
+    );
+
+    if (!response) {
+      throw new Error('Yahoo HTTPレスポンスなし');
+    }
+
+    const status = response.status();
+    console.log('Yahoo HTTP:', status);
+
+    if (status < 200 || status >= 400) {
+      throw new Error(`Yahoo HTTP ${status}`);
+    }
+
+    await page.waitForSelector('body', { timeout: PAGE_TIMEOUT_MS });
+    await page.waitForTimeout(2200);
+
+    const bodyText = String(
+      await page.locator('body').innerText()
+    ).replace(/\u00a0/g, ' ');
+
+    const looksLikeClosedSearch =
+      bodyText.includes('終了180日間') ||
+      bodyText.includes('180日間の落札相場') ||
+      bodyText.includes('落札相場');
+
+    if (!looksLikeClosedSearch) {
+      throw new Error('Yahoo落札相場ページとして確認できません');
+    }
+
+    const rawItems = await extractYahooClosedItems_(
+      page,
+      MAX_SOLD_ITEMS
+    );
+    const comparable = filterComparableItems_(target, rawItems, 'Yahoo落札');
+    yahooItems.push(...comparable);
+    marketStatus.yahooSucceeded = true;
+  } catch (error) {
+    const message = error && error.message ? error.message : String(error);
+    marketErrors.push(`Yahoo落札: ${message}`);
+    console.error(`[${target.dbItemId}] Yahoo落札取得失敗:`, message);
+  }
+
+  if (!marketStatus.mercariSucceeded && !marketStatus.yahooSucceeded) {
+    throw new Error(
+      `${target.dbItemId}: Mercari・Yahoo両市場の取得に失敗しました。${marketErrors.join(' / ')}`
+    );
+  }
+
+  const summary = summarizeTwoMarkets_(
+    target,
+    mercariItems,
+    yahooItems,
+    marketStatus
+  );
+
+  console.log('実売サンプル:', summary.sampleCount);
+  console.log('Mercari売切件数 / 中央値:', summary.mercariSoldCount, yen_(summary.mercariMedianPrice));
+  console.log('Yahoo落札件数 / 中央値:', summary.yahooSoldCount, yen_(summary.yahooMedianPrice));
+  console.log(
+    '市場間中央値差率:',
+    typeof summary.marketMedianGapRate === 'number'
+      ? `${(summary.marketMedianGapRate * 100).toFixed(1)}%`
+      : '—'
+  );
+  console.log('相場ソース判定:', summary.sourceJudgement);
+  console.log('25%値:', yen_(summary.q25Price));
+  console.log('中央値:', yen_(summary.medianPrice));
+  console.log('75%値:', yen_(summary.q75Price));
+  console.log('Historical Score:', summary.historicalScore);
+  console.log('Historical判定:', summary.judgement);
+  console.log('Historical状態:', summary.state);
+
+  await saveSummary_(target, summary);
+
+  if (marketErrors.length) {
+    throw new Error(
+      `${target.dbItemId}: 一部市場は失敗しましたが、取得できた市場のデータは保存済みです。${marketErrors.join(' / ')}`
+    );
+  }
+
+  return summary;
+}
+
+// ============================================================
+// main
+// ============================================================
+
+async function main() {
+  if (!INGEST_URL || !INGEST_SECRET) {
+    throw new Error('GitHub Secrets が設定されていません');
+  }
+
+  const { chromium } = require('playwright');
+
+  console.log('========================================');
+  console.log('Historical Backfill START');
+  console.log('Batch limit:', BATCH_LIMIT);
+  console.log('Max Mercari sold items:', MAX_MERCARI_SOLD_ITEMS);
+  console.log('Max sold items:', MAX_SOLD_ITEMS);
+  console.log('Force:', FORCE);
+  console.log('Dry run:', DRY_RUN);
+  console.log('========================================');
+
+  const targetResult = await getTargets_();
+  const targets = Array.isArray(targetResult.targets)
+    ? targetResult.targets
+    : [];
+
+  console.log('今回対象:', targets.length);
+  console.log('未処理候補:', targetResult.remaining || 0);
+
+  if (!targets.length) {
+    console.log('Historical Backfill: 対象なし');
+    return;
+  }
+
+  const browser = await chromium.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-dev-shm-usage'
+    ]
   });
+
+  const context = await browser.newContext({
+    locale: 'ja-JP',
+    timezoneId: 'Asia/Tokyo',
+    userAgent:
+      'Mozilla/5.0 (X11; Linux x86_64) ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
+      'Chrome/140.0.0.0 Safari/537.36',
+    viewport: {
+      width: 1440,
+      height: 1200
+    }
+  });
+
+  const page = await context.newPage();
+
+  let success = 0;
+  let failed = 0;
+  const errors = [];
+
+  try {
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+
+      try {
+        await runTarget_(page, target);
+        success++;
+      } catch (error) {
+        failed++;
+        const message =
+          error && error.message
+            ? error.message
+            : String(error);
+
+        errors.push({
+          dbItemId: target.dbItemId,
+          error: message
+        });
+
+        console.error(
+          `[${target.dbItemId}] Historical Backfill ERROR:`,
+          message
+        );
+      }
+
+      if (
+        i < targets.length - 1 &&
+        BETWEEN_TARGETS_MS > 0
+      ) {
+        await sleep_(BETWEEN_TARGETS_MS);
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+
+  console.log('========================================');
+  console.log('Historical Backfill END');
+  console.log('成功:', success);
+  console.log('失敗:', failed);
+
+  if (errors.length) {
+    console.log('失敗一覧:', JSON.stringify(errors, null, 2));
+  }
+
+  console.log('========================================');
+
+  // 一部失敗でも成功分は保存済み。
+  // 全件失敗した時だけWorkflowを赤にする。
+  if (success === 0 && failed > 0) {
+    throw new Error('Historical Backfill が全件失敗しました');
+  }
 }
 
+module.exports = {
+  buildRequiredIdentityFeatures_,
+  filterComparableItems_,
+  scoreHistoricalTitleMatch_
+};
 
-function buildHistoricalMercariBuyUrl_(query, maxPrice) {
-  const keyword = encodeURIComponent(String(query || '').trim());
-  if (!keyword) return '';
-
-  return (
-    'https://jp.mercari.com/search' +
-    '?keyword=' + keyword +
-    '&status=on_sale' +
-    (positiveNumberOrZero_(maxPrice) > 0
-      ? '&price_max=' + Math.floor(positiveNumberOrZero_(maxPrice))
-      : '') +
-    '&order=desc' +
-    '&sort=created_time'
-  );
-}
-
-
-function buildHistoricalYahooBuyUrl_(query, maxPrice) {
-  const keyword = encodeURIComponent(String(query || '').trim()).replace(/%20/g, '+');
-  if (!keyword) return '';
-
-  return (
-    'https://auctions.yahoo.co.jp/search/search' +
-    '?p=' + keyword +
-    '&va=' + keyword +
-    (positiveNumberOrZero_(maxPrice) > 0
-      ? '&aucmaxprice=' + Math.floor(positiveNumberOrZero_(maxPrice))
-      : '') +
-    '&is_postage_mode=1' +
-    '&dest_pref_code=40' +
-    '&b=1' +
-    '&n=50' +
-    '&s1=end' +
-    '&o1=a'
-  );
-}
-
-
-function buildHistoricalMercariSoldUrl_(query) {
-  const keyword = encodeURIComponent(String(query || '').trim());
-  if (!keyword) return '';
-
-  return (
-    'https://jp.mercari.com/search' +
-    '?keyword=' + keyword +
-    '&status=sold_out' +
-    '&sort=created_time' +
-    '&order=desc'
-  );
-}
-
-
-function buildHistoricalYahooClosedUrl_(query) {
-  const keyword = String(query || '').trim();
-  if (!keyword) return '';
-
-  return (
-    'https://auctions.yahoo.co.jp/' +
-    'closedsearch/closedsearch/' +
-    encodeURIComponent(keyword) +
-    '/0?n=50'
-  );
+if (require.main === module) {
+  main().catch(error => {
+    console.error(error);
+    process.exit(1);
+  });
 }
