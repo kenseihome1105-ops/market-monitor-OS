@@ -60,6 +60,10 @@ const FORCE =
     .trim()
     .toLowerCase() === 'true';
 
+const TARGET_DB_ITEM_ID = String(
+  process.env.HISTORICAL_TARGET_DB_ITEM_ID || ''
+).trim();
+
 const DRY_RUN =
   String(process.env.HISTORICAL_DRY_RUN || '')
     .trim()
@@ -259,9 +263,23 @@ async function getTargets_() {
       secret: INGEST_SECRET,
       action: 'getHistoricalBackfillTargets',
       limit: BATCH_LIMIT,
-      force: FORCE
+      force: FORCE,
+      dbItemId: TARGET_DB_ITEM_ID
     },
     'Historical targets'
+  );
+}
+
+function selectHistoricalTargets_(targets, requestedDbItemId) {
+  const available = Array.isArray(targets) ? targets : [];
+  const requestedId = String(requestedDbItemId || '').trim();
+
+  if (!requestedId) {
+    return available;
+  }
+
+  return available.filter(target =>
+    String(target && target.dbItemId || '').trim() === requestedId
   );
 }
 
@@ -1492,16 +1510,38 @@ async function main() {
   console.log('Max Mercari sold items:', MAX_MERCARI_SOLD_ITEMS);
   console.log('Max sold items:', MAX_SOLD_ITEMS);
   console.log('Force:', FORCE);
+  console.log('指定DB商品ID:', TARGET_DB_ITEM_ID || '(なし)');
   console.log('Dry run:', DRY_RUN);
   console.log('========================================');
 
+  if (TARGET_DB_ITEM_ID && !FORCE) {
+    throw new Error(
+      'DB商品IDを指定して再処理する場合は、workflow_dispatch の force を true にしてください'
+    );
+  }
+
   const targetResult = await getTargets_();
-  const targets = Array.isArray(targetResult.targets)
+  const returnedTargets = Array.isArray(targetResult.targets)
     ? targetResult.targets
     : [];
+  const targets = selectHistoricalTargets_(
+    returnedTargets,
+    TARGET_DB_ITEM_ID
+  );
 
   console.log('今回対象:', targets.length);
   console.log('未処理候補:', targetResult.remaining || 0);
+
+  if (TARGET_DB_ITEM_ID && targets.length !== 1) {
+    const returnedIds = returnedTargets
+      .map(target => String(target && target.dbItemId || '').trim())
+      .filter(Boolean);
+    throw new Error(
+      `指定ID ${TARGET_DB_ITEM_ID} をApps Scriptから1件取得できませんでした。` +
+      `返却ID: ${returnedIds.join(', ') || '(なし)'}. ` +
+      'Apps Script側にも dbItemId 絞り込みを反映して再デプロイしてください。対象外の商品は処理していません。'
+    );
+  }
 
   if (!targets.length) {
     console.log('Historical Backfill: 対象なし');
@@ -1592,7 +1632,8 @@ async function main() {
 module.exports = {
   buildRequiredIdentityFeatures_,
   filterComparableItems_,
-  scoreHistoricalTitleMatch_
+  scoreHistoricalTitleMatch_,
+  selectHistoricalTargets_
 };
 
 if (require.main === module) {
