@@ -39,6 +39,28 @@ test('BALMAINのホースハイド、ディアスキン、バッファロー革�
   }
 });
 
+test('羊毛皮の高値要素はムートン表記と照合し、通常の羊革ジャケットは除外する', () => {
+  const target = {
+    brand: 'BALMAIN',
+    category: 'メンズ アウター',
+    product: 'ジャケット',
+    highValue: '羊毛皮・冬物'
+  };
+
+  const moutonTitle = scoreHistoricalTitleMatch_(
+    target,
+    'BALMAIN バルマン メンズ ダブルムートンジャケット'
+  );
+  const genericLeatherTitle = scoreHistoricalTitleMatch_(
+    target,
+    'BALMAIN バルマン メンズ 羊革 レザージャケット'
+  );
+
+  assert.equal(moutonTitle.accepted, true, JSON.stringify(moutonTitle));
+  assert.equal(genericLeatherTitle.accepted, false);
+  assert.ok(genericLeatherTitle.reasons.some(reason => reason.includes('高値要素:羊毛皮・冬物')));
+});
+
 test('Burberry London指定では通常のBurberryスーツを除外する', () => {
   const genericTitle = scoreHistoricalTitleMatch_(
     burberryLondonSuit,
