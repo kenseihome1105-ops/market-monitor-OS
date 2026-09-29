@@ -11,6 +11,7 @@ const {
   mergeUniqueItemsById_,
   runConditionsIndependently_,
   rebaseYahooScanOffset_,
+  normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   buildYahooScanUrl_
 } = require('./market-scan-cursor');
@@ -139,6 +140,98 @@ test('Yahoo rebases to the prior item ID after rows disappear before it', () => 
 
   assert.deepEqual(result, { offset: 29, mode: 'REANCHORED' });
 });
+
+test('Yahoo treats an empty continuation page as end-of-results after successful prior pages', () => {
+  const headResult = {
+    ok: true,
+    items: [{ itemId: 'head-1' }],
+    rawRowsRead: 1,
+    rawItemIds: ['head-1'],
+    lastRawItemId: 'head-1'
+  };
+  const lookbackResult = {
+    ok: true,
+    items: [{ itemId: 'anchor' }],
+    rawRowsRead: 1,
+    rawItemIds: ['anchor'],
+    lastRawItemId: 'anchor'
+  };
+  const emptyContinuation = {
+    ok: false,
+    failureReason: 'NO_PRODUCT_CARDS',
+    items: [],
+    rawRowsRead: 0,
+    rawItemIds: [],
+    lastRawItemId: ''
+  };
+
+  const result = normalizeYahooContinuationResult_(
+    headResult,
+    lookbackResult,
+    emptyContinuation
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.endOfResults, true);
+  assert.equal(result.rawRowsRead, 0);
+  assert.equal(result.lastRawItemId, '');
+  assert.equal(nextYahooScanOffset_(29, result.rawRowsRead), 1);
+});
+
+test('Yahoo keeps empty-page retrieval failures and failed prior pages as errors', () => {
+  const headResult = { ok: true };
+  const lookbackResult = { ok: true };
+  const emptyContinuation = {
+    ok: false,
+    failureReason: 'NO_PRODUCT_CARDS',
+    items: [],
+    rawRowsRead: 0,
+    rawItemIds: [],
+    lastRawItemId: ''
+  };
+  const retrievalFailure = {
+    ok: false,
+    failureReason: 'SEARCH_RETRY_FAILED',
+    items: [],
+    rawRowsRead: 0,
+    rawItemIds: [],
+    lastRawItemId: ''
+  };
+
+  assert.strictEqual(
+    normalizeYahooContinuationResult_(
+      { ok: false },
+      lookbackResult,
+      emptyContinuation
+    ),
+    emptyContinuation
+  );
+  assert.strictEqual(
+    normalizeYahooContinuationResult_(
+      headResult,
+      { ok: false },
+      emptyContinuation
+    ),
+    emptyContinuation
+  );
+  assert.strictEqual(
+    normalizeYahooContinuationResult_(
+      headResult,
+      lookbackResult,
+      retrievalFailure
+    ),
+    retrievalFailure
+  );
+  assert.strictEqual(
+    normalizeYahooContinuationResult_(
+      emptyContinuation,
+      null,
+      emptyContinuation
+    ),
+    emptyContinuation
+  );
+});
+
 
 test('Yahoo resets to the head if the previous auction ID has disappeared', () => {
   const result = rebaseYahooScanOffset_(31, 'ended-auction', 21, listings(10).map(item => item.itemId));
