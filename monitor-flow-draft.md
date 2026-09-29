@@ -14,7 +14,7 @@ This file describes the current implementation on codex/backfill-to-monitor-curs
 - Mercari is newest-first. The crawler records raw listing IDs and resumes after the previous anchor. If the anchor is outside the loaded window or no longer present, it restarts at the head; ledger and notification dedupe absorb replay.
 - Yahoo Auctions uses shortest remaining time first (s1=end&o1=a). It fetches the previous page to find the saved boundary listing, rebases the one-based offset, and advances by raw rows rather than only listings that pass title or price filters.
 - Yahoo checks the first page every run for urgent auctions, then merges it with the continuation page by item ID.
-- Failed ingestion does not advance the cursor. A missing or expired anchor resets to the head.
+- Failed ingestion or Yahoo search does not advance the saved cursor. A missing or expired anchor resets to the head.
 - Market results change during a scan. These rules reduce offset drift and duplicate work, but do not provide a source-side stable snapshot or guarantee zero omissions.
 
 ## Shared workflow queue
@@ -25,6 +25,6 @@ Until the workflow changes merge to main, main's old concurrency policy can repl
 
 ## Validation and boundary
 
-Yahoo Test #948 ran on the live Apps Script v11 endpoint and reached all 12 conditions, including all five Backfill Yahoo conditions. The live Y-06 request succeeded, so the transient-failure path is covered by the unit test rather than reproduced live.
+Yahoo Test #948 ran on the live Apps Script v11 endpoint and reached all 12 conditions, including all five Backfill Yahoo conditions. The live Y-06 request succeeded, so no live search-failure case was reproduced. Unit workflow #10 on commit 23105b2 passed 37 tests and syntax checks; it covers both thrown errors and returned `ok: false` scan failures, and verifies later conditions still run.
 
 The test validates marketplace scanning and ledger/cursor ingestion. It does not assert that a final LINE notification was sent. Changes to cron times, LINE judgment/dedupe logic, and Apps Script triggers are outside this branch.
