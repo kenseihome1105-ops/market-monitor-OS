@@ -2043,6 +2043,7 @@ async function main() {
       let scanOffset = storedScanOffset;
       let cursorMode = 'HEAD';
       let coverageResult = headResult;
+      let lookbackResult = null;
 
       if (storedScanOffset > defaultScanOffset_(MARKET)) {
         if (storedLastItemId) {
@@ -2050,22 +2051,28 @@ async function main() {
             defaultScanOffset_(MARKET),
             storedScanOffset - MAX_SEARCH_ITEMS
           );
-          const lookbackResult = await scanYahooSearch(
+          lookbackResult = await scanYahooSearch(
             searchPage,
             config,
             lookbackOffset
           );
-          const rebased = rebaseYahooScanOffset_(
-            storedScanOffset,
-            storedLastItemId,
-            lookbackOffset,
-            lookbackResult.rawItemIds
-          );
-          scanOffset = rebased.offset;
-          cursorMode = rebased.mode;
-          coverageResult = scanOffset === defaultScanOffset_(MARKET)
-            ? headResult
-            : await scanYahooSearch(searchPage, config, scanOffset);
+
+          if (!lookbackResult.ok) {
+            cursorMode = 'LOOKBACK_FAILED';
+            coverageResult = lookbackResult;
+          } else {
+            const rebased = rebaseYahooScanOffset_(
+              storedScanOffset,
+              storedLastItemId,
+              lookbackOffset,
+              lookbackResult.rawItemIds
+            );
+            scanOffset = rebased.offset;
+            cursorMode = rebased.mode;
+            coverageResult = scanOffset === defaultScanOffset_(MARKET)
+              ? headResult
+              : await scanYahooSearch(searchPage, config, scanOffset);
+          }
         } else {
           // 旧形式のoffsetだけでは、変動した検索結果を安全に再開できない。
           scanOffset = defaultScanOffset_(MARKET);
@@ -2121,11 +2128,12 @@ async function main() {
           coverageResult.lastRawItemId
         );
       } else {
-        // 検索に失敗した時は位置を進めず、次回は先頭から再確認する。
-        await acknowledgeMarketScanCursor_(
+        // 取得に失敗した場合は保存済み位置を維持し、次回同じ位置から再試行する。
+        console.warn(
+          'Yahoo検索失敗。保存済みカーソルを維持します:',
           config.conditionId,
-          defaultScanOffset_(MARKET),
-          ''
+          cursorMode,
+          storedScanOffset
         );
       }
 
@@ -2211,6 +2219,28 @@ async function main() {
       await sleep(
         500
       );
+
+      const failedStages = [];
+      if (!headResult.ok) failedStages.push('先頭');
+      if (lookbackResult && !lookbackResult.ok) {
+        failedStages.push('カーソル再確認');
+      }
+      if (
+        !coverageResult.ok &&
+        coverageResult !== headResult &&
+        coverageResult !== lookbackResult
+      ) {
+        failedStages.push('継続位置');
+      }
+
+      if (failedStages.length > 0) {
+        return {
+          ok: false,
+          error: 'Yahoo検索に失敗: ' + failedStages.join(', ')
+        };
+      }
+
+      return { ok: true };
       },
       failure => {
         console.error(
