@@ -1,50 +1,30 @@
-# Backfill → Monitor test draft
+# Backfill-to-Monitor cursor design
 
-This draft connects each returned Historical Backfill target to the existing
-Mercari and Yahoo monitor configuration flow. It is prepared for an isolated
-GitHub branch and Apps Script review. It has not been deployed or run against
-the live spreadsheet.
+This file describes the current implementation on codex/backfill-to-monitor-cursor. It supersedes the earlier numeric-offset-only draft.
 
-## Draft behavior
+## Flow
 
-- A Backfill batch registers one stable condition per available market URL and
-  DB product ID before historical pages are scraped. Repeated registration is
-  idempotent. Existing rows, including a manually disabled row, are left alone.
-- The Apps Script source adds the `市場監視走査状態` sheet when the first
-  registration or cursor acknowledgment is received. It stores the condition,
-  DB product ID, buy limit, next offset, last item ID, and update time.
-- Each market scan sends at most 10 listings from the saved offset. The offset
-  advances only after the ledger ingest succeeds. An exhausted result resets
-  to the top for the next pass. Mercari stops without advancing if it cannot
-  load the requested range before its scroll safety limit.
-- The saved position is numeric. If the marketplace inserts or removes results
-  ahead of that position, the page can shift. Ledger dedupe suppresses repeat
-  ingest, and the next pass starts at the top again, but this draft cannot
-  guarantee zero omissions during a changing feed. An item that disappears
-  before the crawler reaches it cannot be recovered from the active listing.
-- Yahoo uses the existing search URL's order and paginates with `b`/`n`. The
-  current Backfill URL builder uses `s1=end&o1=a`, which sorts by auction end
-  time rather than newly listed time. Therefore the Yahoo portion still needs
-  its sort URL verified before this is enabled as a newest-first monitor. The
-  official Yahoo help describes “新着順” as based on the original listing time;
-  relisted items may not appear at the top. See
-  [Yahoo's help page](https://support.yahoo-net.jp/SccAuctions/s/article/H000008846).
-- Backfill's `normalBuyLimit` is returned to the Yahoo scanner so the old
-  ¥29,000 parser ceiling does not exclude higher-priced Backfill targets.
-  Manual Yahoo conditions without a stored limit retain the existing ceiling.
-- LINE judging, notification dedupe, existing time schedules, concurrency
-  groups, and Apps Script triggers are unchanged.
+1. Historical Backfill selects DB products and creates a stable BF_M or BF_Y condition from each valid market search URL.
+2. The registration endpoint adds missing conditions while preserving existing rows and manual OFF states.
+3. Each monitor condition checks the first 10 rows and a 10-row continuation window. The two windows merge by listing ID before ingestion.
+4. The monitor acknowledges the new cursor only after Apps Script accepts the ledger ingest.
 
-## Verification
+## Cursor rules
 
-Run `npm test` from this folder. The private Apps Script draft has a separate
-mock-sheet test:
+- Mercari is newest-first. The crawler records raw listing IDs and resumes after the previous anchor. If the anchor is outside the loaded window or no longer present, it restarts at the head; ledger and notification dedupe absorb replay.
+- Yahoo Auctions uses shortest remaining time first (s1=end&o1=a). It fetches the previous page to find the saved boundary listing, rebases the one-based offset, and advances by raw rows rather than only listings that pass title or price filters.
+- Yahoo checks the first page every run for urgent auctions, then merges it with the continuation page by item ID.
+- Failed ingestion does not advance the cursor. A missing or expired anchor resets to the head.
+- Market results change during a scan. These rules reduce offset drift and duplicate work, but do not provide a source-side stable snapshot or guarantee zero omissions.
 
-```bash
-node --test private-appscript/market-ingest-cursor.test.js
-```
+## Shared workflow queue
 
-Do not enable this draft in production until the Yahoo sort and the projected
-workflow duration have been checked against the actual enabled-condition
-count. The current monitor workflows still process all enabled conditions
-sequentially.
+The historical backfill, Market Monitor, and Yahoo workflows share one production concurrency group. This branch sets queue: max on the four group members so up to 100 pending runs can remain queued. Queue growth still needs monitoring because the scheduled arrivals are about every 10 minutes across the three recurring workflows, while observed runs take roughly 8–10 minutes.
+
+Until the workflow changes merge to main, main's old concurrency policy can replace a pending test-branch run. A pending Yahoo test run was replaced by a scheduled main Yahoo run during validation.
+
+## Validation and boundary
+
+Yahoo Test #948 ran on the live Apps Script v11 endpoint and reached all 12 conditions, including all five Backfill Yahoo conditions. The live Y-06 request succeeded, so the transient-failure path is covered by the unit test rather than reproduced live.
+
+The test validates marketplace scanning and ledger/cursor ingestion. It does not assert that a final LINE notification was sent. Changes to cron times, LINE judgment/dedupe logic, and Apps Script triggers are outside this branch.

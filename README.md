@@ -1,54 +1,39 @@
-# Backfill → Monitor test draft
+# Backfill → Monitor test branch
 
-This draft connects each returned Historical Backfill target to the existing
-Mercari and Yahoo monitor configuration flow. It is prepared for an isolated
-GitHub branch and Apps Script review. It has not been deployed or run against
-the live spreadsheet.
+## Status
 
-## Draft behavior
-
-- A Backfill batch registers one stable condition per available market URL and
-  DB product ID before historical pages are scraped. Repeated registration is
-  idempotent. Existing rows, including a manually disabled row, are left alone.
-- The Apps Script source adds the `市場監視走査状態` sheet when the first
-  registration or cursor acknowledgment is received. It stores the condition,
-  DB product ID, buy limit, next offset, last item ID, and update time.
-- Each condition runs two 10-row lanes: the current head for new/urgent items,
-  and a saved continuation for broad coverage. Item IDs merge the lanes before
-  ingest, so overlap is handled once. Continuation state advances only after
-  ledger ingest succeeds.
-- Mercari continuation locates the previous raw listing ID in the newly loaded
-  result stream. If it moved within the bounded lookahead, the scan resumes
-  after it. If it is missing, the scan restarts at the head; item-ID upsert and
-  notification dedupe absorb replay. Mercari stays newest-first.
-- Yahoo remains sorted by shortest time to end (`s1=end&o1=a`), which the live
-  search page labels “残り時間の短い順”. Its continuation validates the saved
-  boundary ID against the preceding raw page and rebases the one-based offset.
-  The cursor advances by raw result rows, even when no rows pass the title or
-  buy-price filters. A missing boundary restarts from the head. The head lane
-  checks imminent auctions every workflow run.
-- Both feeds change while they are being scanned. This reduces silent skips and
-  recovers through replay, but cannot recover an auction that ends before any
-  scan reaches it or guarantee a stable snapshot without a source-side cursor.
-- Backfill's `normalBuyLimit` is returned to the Yahoo scanner so the old
-  ¥29,000 parser ceiling does not exclude higher-priced Backfill targets.
-  Manual Yahoo conditions without a stored limit retain the existing ceiling.
-- Workflow cron schedules, LINE judging, notification dedupe, and Apps Script
-  triggers are unchanged. The four workflows sharing the production concurrency
-  group use `queue: max` in this test draft, keeping their serialized order while
-  retaining up to 100 pending runs instead of replacing the previous pending
-  run.
+The implementation is on codex/backfill-to-monitor-cursor and has not been merged to main. The GitHub branch is not an isolated data environment: the tested workflows used the configured MARKET_INGEST_URL and MARKET_INGEST_SECRET to call the deployed Apps Script v11 endpoint and update the live ledger/cursor state.
 
 ## Verification
 
-Run `npm test` from this folder. The private Apps Script draft has a separate
-mock-sheet test:
+- Historical Backfill Batch #40 on commit da60b5b selected 5 targets and registered 10 monitor conditions (Mercari and Yahoo for each target); all 10 were accepted.
+- Yahoo Test #948 on commit 1174120 completed successfully. It reached all 12 enabled conditions, including all five BF_Y conditions. Each condition was ingested successfully:
+  
+  | Condition | Received | New | Updated |
+  |---|---:|---:|---:|
+  | Sullivan leather jacket | 10 | 0 | 10 |
+  | Burberry knitwear | 10 | 0 | 10 |
+  | Yohji Yamamoto knitwear | 7 | 0 | 7 |
+  | Balenciaga sneakers | 6 | 4 | 2 |
+  | Cartier watch | 10 | 3 | 7 |
 
-```bash
-node --test private-appscript/market-ingest-cursor.test.js
-```
+  These counts are per condition; the same listing can appear in more than one search.
+- Monitor flow unit tests and JavaScript syntax checks passed on commit 1174120. The unit test simulates one Yahoo condition throwing and verifies later conditions still run. Y-06 succeeded during the live run, so that failure path was not reproduced against Yahoo.
+- This run verified scanning and ledger/cursor ingestion. It did not verify the final LINE notification path.
 
-Before production, compare the measured workflow runtime with the additional
-head-page and anchor-validation requests. The current monitor workflows still
-process all enabled conditions sequentially, so sustained queue growth must be
-checked before changing the cron frequency.
+## Behavior
+
+- Historical Backfill registers one stable monitor condition per valid market URL and DB product ID before collecting historical pages. Repeated registration is idempotent, and existing rows, including manually disabled rows, are left unchanged.
+- Each enabled condition checks a 10-row head lane and a 10-row continuation lane. Item IDs merge the lanes before ingestion, so overlap is processed once.
+- Mercari remains newest-first. Its continuation finds the prior raw listing ID in the loaded stream; if the anchor is missing, it restarts at the head and relies on item-ID upsert and notification dedupe for replay.
+- Yahoo Auctions stays sorted by shortest time to end (s1=end&o1=a). It validates the saved boundary ID against the prior page, advances by raw result rows, and checks the head on every run.
+- The cursor advances only after successful ledger ingestion. A failed ingest leaves the saved position available for retry.
+- Backfill normalBuyLimit is passed to Yahoo scanning so the prior ¥29,000 parser ceiling does not exclude higher-priced targets.
+
+## Scheduling and limits
+
+Four workflows share the market-monitor-os-production concurrency group. This branch adds queue: max to all four, preserving up to 100 pending runs instead of replacing the pending run. Before that change reaches main, scheduled main runs can still replace a waiting test-branch run; this happened to Yahoo Test #946 when scheduled main run #947 arrived.
+
+The branch does not change cron expressions, LINE judging, notification dedupe, or Apps Script triggers. Queueing reduces lost pending runs but can build a backlog. One Yahoo test-branch run took about 8 minutes; a main-branch Market Monitor run took about 9 minutes. Monitor pending-queue depth and end-to-end runtime before increasing schedules.
+
+Both marketplaces change while they are being scanned. Anchor rebasing and replay reduce missed items and duplicates, but cannot guarantee a stable snapshot or recover an item that disappears before the crawler reaches it.
