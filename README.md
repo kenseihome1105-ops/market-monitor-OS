@@ -18,7 +18,7 @@ The implementation is on codex/backfill-to-monitor-cursor and has not been merge
   | Cartier watch | 10 | 3 | 7 |
 
   These counts are per condition; the same listing can appear in more than one search.
-- Monitor flow unit tests and JavaScript syntax checks passed on commit 1174120. The unit test simulates one Yahoo condition throwing and verifies later conditions still run. Y-06 succeeded during the live run, so that failure path was not reproduced against Yahoo.
+- Monitor flow unit workflow #10 on commit 23105b2 passed 37 tests, 0 failures; JavaScript syntax checks passed. Tests cover thrown condition errors and a Yahoo scan result with `ok: false`, and verify later conditions still run. Y-06 succeeded during the live run, so no live search-failure case was reproduced.
 - This run verified scanning and ledger/cursor ingestion. It did not verify the final LINE notification path.
 
 ## Behavior
@@ -27,7 +27,7 @@ The implementation is on codex/backfill-to-monitor-cursor and has not been merge
 - Each enabled condition checks a 10-row head lane and a 10-row continuation lane. Item IDs merge the lanes before ingestion, so overlap is processed once.
 - Mercari remains newest-first. Its continuation finds the prior raw listing ID in the loaded stream; if the anchor is missing, it restarts at the head and relies on item-ID upsert and notification dedupe for replay.
 - Yahoo Auctions stays sorted by shortest time to end (s1=end&o1=a). It validates the saved boundary ID against the prior page, advances by raw result rows, and checks the head on every run.
-- The cursor advances only after successful ledger ingestion. A failed ingest leaves the saved position available for retry.
+- The cursor advances only after successful ledger ingestion. Failed ingestion or Yahoo search keeps the saved position available for retry; a failed condition is reported after later conditions finish.
 - Backfill normalBuyLimit is passed to Yahoo scanning so the prior ¥29,000 parser ceiling does not exclude higher-priced targets.
 
 ## Scheduling and limits
