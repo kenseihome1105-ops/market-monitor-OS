@@ -5,6 +5,7 @@ const {
   selectCursorBatch_,
   mergeUniqueItemsById_
 } = require('./market-scan-cursor');
+const { shouldRetryAppsScriptResult_ } = require('./apps-script-retry');
 
 
 // ============================================================
@@ -432,9 +433,27 @@ async function postAppsScriptJson(
       result.ok !== true
     ) {
 
-      throw new Error(
+      lastError = new Error(
         `${label}側エラー: ${JSON.stringify(result)}`
       );
+
+      if (
+        shouldRetryAppsScriptResult_(
+          result,
+          attempt,
+          APPS_SCRIPT_MAX_ATTEMPTS
+        )
+      ) {
+
+        console.warn(
+          `[${label}] Apps Scriptのwrite lock競合を一時エラーとして再試行します`
+        );
+
+        continue;
+
+      }
+
+      throw lastError;
 
     }
 
