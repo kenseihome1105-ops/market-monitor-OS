@@ -3,7 +3,7 @@ name: Monitor flow unit tests
 on:
   push:
     branches:
-      - codex/backfill-to-monitor-cursor
+      - 'codex/**'
   workflow_dispatch:
 
 permissions:
