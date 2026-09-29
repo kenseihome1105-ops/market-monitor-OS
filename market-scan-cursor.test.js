@@ -4,8 +4,13 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
   MAX_SCAN_ITEMS,
+  CURSOR_LOOKAHEAD_ITEMS,
   defaultScanOffset_,
   selectOffsetBatch_,
+  selectCursorBatch_,
+  mergeUniqueItemsById_,
+  rebaseYahooScanOffset_,
+  nextYahooScanOffset_,
   buildYahooScanUrl_
 } = require('./market-scan-cursor');
 
@@ -29,6 +34,70 @@ test('the final short batch advances by the number actually consumed', () => {
   const result = selectOffsetBatch_(listings(25), 20);
   assert.equal(result.items.length, 5);
   assert.equal(result.nextOffset, 25);
+});
+
+test('Mercari resumes after the previous item ID when new listings shift the offset', () => {
+  const current = [
+    { itemId: 'new-1' },
+    { itemId: 'new-2' },
+    ...listings(25)
+  ];
+  const result = selectCursorBatch_(current, 'item-10', 10);
+
+  assert.equal(CURSOR_LOOKAHEAD_ITEMS, 10);
+  assert.equal(result.mode, 'REANCHORED_FORWARD');
+  assert.equal(result.startOffset, 12);
+  assert.deepEqual(
+    result.items.map(item => item.itemId),
+    ['item-11', 'item-12', 'item-13', 'item-14', 'item-15', 'item-16', 'item-17', 'item-18', 'item-19', 'item-20']
+  );
+  assert.equal(result.nextOffset, 22);
+});
+
+test('Mercari resets to the head when the prior anchor is no longer loaded', () => {
+  const result = selectCursorBatch_(listings(15), 'expired-or-missing', 30);
+  assert.equal(result.mode, 'RESET_ANCHOR_MISSING');
+  assert.equal(result.startOffset, 0);
+  assert.deepEqual(result.items.map(item => item.itemId), listings(10).map(item => item.itemId));
+});
+
+test('Mercari cursor advances through raw listing IDs even when a row has no eligible payload', () => {
+  const rawIds = ['item-1', 'item-2', 'item-3', 'item-4'];
+  const result = selectCursorBatch_(rawIds, 'item-2', 2, 2);
+
+  assert.deepEqual(result.items, ['item-3', 'item-4']);
+  assert.equal(result.nextOffset, 4);
+});
+
+test('head and continuation lanes merge once per item ID', () => {
+  const merged = mergeUniqueItemsById_(
+    [{ itemId: 'a', source: 'head' }, { itemId: 'b' }],
+    [{ itemId: 'a', source: 'continuation' }, { itemId: 'c' }]
+  );
+
+  assert.deepEqual(merged, [
+    { itemId: 'a', source: 'head' },
+    { itemId: 'b' },
+    { itemId: 'c' }
+  ]);
+});
+
+test('Yahoo rebases to the prior item ID after rows disappear before it', () => {
+  const priorWindowIds = listings(10).map(item => item.itemId);
+  const result = rebaseYahooScanOffset_(31, 'item-8', 21, priorWindowIds);
+
+  assert.deepEqual(result, { offset: 29, mode: 'REANCHORED' });
+});
+
+test('Yahoo resets to the head if the previous auction ID has disappeared', () => {
+  const result = rebaseYahooScanOffset_(31, 'ended-auction', 21, listings(10).map(item => item.itemId));
+  assert.deepEqual(result, { offset: 1, mode: 'RESET_ANCHOR_MISSING' });
+});
+
+test('Yahoo offset advances by raw rows even if zero or fewer than ten pass buying filters', () => {
+  assert.equal(nextYahooScanOffset_(1, 10), 11);
+  assert.equal(nextYahooScanOffset_(31, 10), 41);
+  assert.equal(nextYahooScanOffset_(11, 0), 1);
 });
 
 test('an exhausted listing page requests a reset instead of advancing past the end', () => {

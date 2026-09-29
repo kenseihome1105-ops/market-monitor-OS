@@ -1,7 +1,9 @@
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
-  selectOffsetBatch_
+  CURSOR_LOOKAHEAD_ITEMS,
+  selectCursorBatch_,
+  mergeUniqueItemsById_
 } = require('./market-scan-cursor');
 
 
@@ -849,11 +851,10 @@ async function loadListings(
 // ============================================================
 
 async function extractMercariItems(
-  page,
-  maxItems
+  page
 ) {
 
-  const raw =
+  const extracted =
     await page.evaluate(
       () => {
 
@@ -871,6 +872,10 @@ async function extractMercariItems(
 
         const results =
           [];
+
+        const rawItemIds = [];
+
+        const seenRawItemIds = new Set();
 
 
         for (
@@ -892,6 +897,22 @@ async function extractMercariItems(
 
             continue;
 
+          }
+
+          let itemId = '';
+          try {
+            const pathname = new URL(href, location.origin).pathname;
+            const normal = pathname.match(/^\/item\/(m\d+)/i);
+            const shop = pathname.match(/^\/shops\/product\/([A-Za-z0-9_-]+)/i);
+            itemId = normal ? normal[1] : shop ? `shops:${shop[1]}` : '';
+          } catch (error) {
+            itemId = '';
+          }
+
+          if (!itemId) continue;
+          if (!seenRawItemIds.has(itemId)) {
+            seenRawItemIds.add(itemId);
+            rawItemIds.push(itemId);
           }
 
 
@@ -1078,6 +1099,8 @@ async function extractMercariItems(
 
           results.push({
 
+            itemId,
+
             href,
 
             title,
@@ -1089,7 +1112,10 @@ async function extractMercariItems(
         }
 
 
-        return results;
+        return {
+          items: results,
+          rawItemIds
+        };
 
       }
     );
@@ -1105,7 +1131,7 @@ async function extractMercariItems(
 
   for (
     const row
-    of raw
+    of extracted.items
   ) {
 
     const parsed =
@@ -1185,10 +1211,10 @@ async function extractMercariItems(
   }
 
 
-  return Array
-    .from(
-      map.values()
-    );
+  return {
+    items: Array.from(map.values()),
+    rawItemIds: extracted.rawItemIds
+  };
 
 }
 
@@ -3082,31 +3108,59 @@ async function scanMercariCondition(
   const scanOffset = Number.isInteger(Number(config.scanOffset))
     ? Math.max(0, Number(config.scanOffset))
     : defaultScanOffset_(MARKET);
+  const lastItemId = String(config.lastItemId || '').trim();
+  const targetCount = lastItemId
+    ? scanOffset + MAX_SEARCH_ITEMS + CURSOR_LOOKAHEAD_ITEMS
+    : MAX_SEARCH_ITEMS;
 
   await loadListings(
     page,
-    scanOffset + MAX_SEARCH_ITEMS
+    targetCount
   );
 
 
-  const allItems =
+  const extracted =
     await extractMercariItems(
-      page,
-      Number.MAX_SAFE_INTEGER
+      page
     );
 
-  const batch = selectOffsetBatch_(
-    allItems,
+  const itemById = new Map(
+    extracted.items.map(item => [item.itemId, item])
+  );
+  const rawItemIds = extracted.rawItemIds;
+
+  const batch = selectCursorBatch_(
+    rawItemIds,
+    lastItemId,
     scanOffset,
     MAX_SEARCH_ITEMS
   );
 
-  const items = batch.items;
+  const headItems = rawItemIds
+    .slice(0, MAX_SEARCH_ITEMS)
+    .map(itemId => itemById.get(itemId))
+    .filter(Boolean);
+  const continuationItems = batch.items
+    .map(itemId => itemById.get(itemId))
+    .filter(Boolean);
+  const items = mergeUniqueItemsById_(headItems, continuationItems);
 
 
   console.log(
     '取得商品数:',
     items.length
+  );
+  console.log(
+    'Mercariカーソル:',
+    JSON.stringify({
+      mode: batch.mode,
+      storedOffset: scanOffset,
+      startOffset: batch.startOffset,
+      lastItemId: lastItemId || '',
+      rawRowsAvailable: rawItemIds.length,
+      headItems: headItems.length,
+      continuationItems: continuationItems.length
+    })
   );
 
 
@@ -3124,7 +3178,7 @@ async function scanMercariCondition(
   }
 
 
-  if (!items.length && scanOffset > 0) {
+  if (!rawItemIds.length && (scanOffset > 0 || lastItemId)) {
     await acknowledgeMarketScanCursor_(
       config.conditionId,
       defaultScanOffset_(MARKET),
@@ -3137,7 +3191,7 @@ async function scanMercariCondition(
     return { received: 0, inserted: 0, updated: 0, insertedItems: [] };
   }
 
-  if (items.length === 0) {
+  if (!rawItemIds.length) {
 
     throw new Error(
       config.conditionId +
@@ -3155,8 +3209,12 @@ async function scanMercariCondition(
 
   await acknowledgeMarketScanCursor_(
     config.conditionId,
-    scanOffset + items.length,
-    items[items.length - 1].itemId
+    batch.nextOffset === null
+      ? defaultScanOffset_(MARKET)
+      : batch.nextOffset,
+    batch.items.length
+      ? batch.items[batch.items.length - 1]
+      : ''
   );
 
 

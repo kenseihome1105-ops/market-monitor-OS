@@ -1,7 +1,10 @@
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  rebaseYahooScanOffset_,
+  nextYahooScanOffset_,
+  mergeUniqueItemsById_
 } = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -402,7 +405,7 @@ async function getYahooConfigs() {
 // Yahoo検索結果
 //
 // 役割:
-// 新しい出品を発見する。
+// 終了時間が近い出品を優先し、各条件の先頭と継続位置を走査する。
 //
 // Yahoo検索側が一時的に取得不能でも
 // 既存商品の詳細追跡は止めない。
@@ -410,7 +413,8 @@ async function getYahooConfigs() {
 
 async function scanYahooSearch(
   page,
-  config
+  config,
+  requestedOffset
 ) {
 
   const conditionId =
@@ -422,9 +426,11 @@ async function scanYahooSearch(
   const searchUrl =
     config.searchUrl;
 
-  const scanOffset = Number.isInteger(Number(config.scanOffset))
-    ? Math.max(1, Number(config.scanOffset))
-    : defaultScanOffset_(MARKET);
+  const scanOffset = Number.isInteger(Number(requestedOffset))
+    ? Math.max(1, Number(requestedOffset))
+    : Number.isInteger(Number(config.scanOffset))
+      ? Math.max(1, Number(config.scanOffset))
+      : defaultScanOffset_(MARKET);
   const pagedSearchUrl = buildYahooScanUrl_(
     searchUrl,
     scanOffset,
@@ -443,7 +449,7 @@ async function scanYahooSearch(
   );
 
   console.log(
-    '① Yahoo新着検索'
+    '① Yahoo終了時間が近い順検索'
   );
 
 
@@ -536,7 +542,13 @@ async function scanYahooSearch(
       '⚠️ 既存商品の価格追跡は継続します'
     );
 
-    return [];
+    return {
+      ok: false,
+      items: [],
+      rawRowsRead: 0,
+      rawItemIds: [],
+      lastRawItemId: ''
+    };
 
   }
 
@@ -546,7 +558,7 @@ async function scanYahooSearch(
     ? configuredMaxBuyPrice
     : 29000;
 
-  const items =
+  const pageResult =
     await page.evaluate(
       ({ MAX_SEARCH_ITEMS, maxBuyPrice }) => {
 
@@ -564,10 +576,11 @@ async function scanYahooSearch(
             document.querySelectorAll(
               'li.Product'
             )
-          );
+          ).slice(0, MAX_SEARCH_ITEMS);
 
 
         const results = [];
+        const rawItemIds = [];
 
         const seen = new Set();
 
@@ -612,6 +625,8 @@ async function scanYahooSearch(
             }
 
           }
+
+          rawItemIds.push(itemId);
 
 
           if (
@@ -912,7 +927,11 @@ async function scanYahooSearch(
         }
 
 
-        return results;
+        return {
+          items: results,
+          rawRowsRead: cards.length,
+          rawItemIds
+        };
 
       },
 
@@ -921,13 +940,13 @@ async function scanYahooSearch(
 
 
   console.log(
-    '新着取得:',
-    items.length,
+    '仕入判定対象取得:',
+    pageResult.items.length,
     '件'
   );
 
 
-  items.forEach(
+  pageResult.items.forEach(
     (item, index) => {
 
       console.log(
@@ -941,7 +960,18 @@ async function scanYahooSearch(
   );
 
 
-  return items;
+  const lastRawItemId = pageResult.rawItemIds
+    .slice()
+    .reverse()
+    .find(Boolean) || '';
+
+  return {
+    ok: true,
+    items: pageResult.items,
+    rawRowsRead: pageResult.rawRowsRead,
+    rawItemIds: pageResult.rawItemIds,
+    lastRawItemId
+  };
 
 }
 
@@ -2000,16 +2030,68 @@ async function main() {
       );
 
 
-      const scanOffset = Number.isInteger(Number(config.scanOffset))
+      const storedScanOffset = Number.isInteger(Number(config.scanOffset))
         ? Math.max(1, Number(config.scanOffset))
         : defaultScanOffset_(MARKET);
+      const storedLastItemId = String(config.lastItemId || '').trim();
 
 
-      const searchItems =
+      // 毎回先頭10行も確認し、新着・終了間近の出品を拾う。
+      const headResult =
         await scanYahooSearch(
           searchPage,
-          config
+          config,
+          defaultScanOffset_(MARKET)
         );
+
+      let scanOffset = storedScanOffset;
+      let cursorMode = 'HEAD';
+      let coverageResult = headResult;
+
+      if (storedScanOffset > defaultScanOffset_(MARKET)) {
+        if (storedLastItemId) {
+          const lookbackOffset = Math.max(
+            defaultScanOffset_(MARKET),
+            storedScanOffset - MAX_SEARCH_ITEMS
+          );
+          const lookbackResult = await scanYahooSearch(
+            searchPage,
+            config,
+            lookbackOffset
+          );
+          const rebased = rebaseYahooScanOffset_(
+            storedScanOffset,
+            storedLastItemId,
+            lookbackOffset,
+            lookbackResult.rawItemIds
+          );
+          scanOffset = rebased.offset;
+          cursorMode = rebased.mode;
+          coverageResult = scanOffset === defaultScanOffset_(MARKET)
+            ? headResult
+            : await scanYahooSearch(searchPage, config, scanOffset);
+        } else {
+          // 旧形式のoffsetだけでは、変動した検索結果を安全に再開できない。
+          scanOffset = defaultScanOffset_(MARKET);
+          cursorMode = 'RESET_ANCHOR_MISSING';
+          coverageResult = headResult;
+        }
+      }
+
+      console.log(
+        'Yahooカーソル:',
+        JSON.stringify({
+          mode: cursorMode,
+          storedOffset: storedScanOffset,
+          scanOffset,
+          lastItemId: storedLastItemId
+        })
+      );
+
+      const searchItems = mergeUniqueItemsById_(
+        headResult.ok ? headResult.items : [],
+        coverageResult.ok ? coverageResult.items : []
+      );
 
 
       // ======================================================
@@ -2032,16 +2114,24 @@ async function main() {
           config.conditionId
         );
 
-      const nextOffset = searchItems.length
-        ? scanOffset + searchItems.length
-        : defaultScanOffset_(MARKET);
-      await acknowledgeMarketScanCursor_(
-        config.conditionId,
-        nextOffset,
-        searchItems.length
-          ? searchItems[searchItems.length - 1].itemId
-          : ''
-      );
+      if (coverageResult.ok) {
+        const nextOffset = nextYahooScanOffset_(
+          scanOffset,
+          coverageResult.rawRowsRead
+        );
+        await acknowledgeMarketScanCursor_(
+          config.conditionId,
+          nextOffset,
+          coverageResult.lastRawItemId
+        );
+      } else {
+        // 検索に失敗した時は位置を進めず、次回は先頭から再確認する。
+        await acknowledgeMarketScanCursor_(
+          config.conditionId,
+          defaultScanOffset_(MARKET),
+          ''
+        );
+      }
 
 
       console.log(
