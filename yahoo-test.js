@@ -1,4 +1,12 @@
 const { chromium } = require('playwright');
+const {
+  defaultScanOffset_,
+  buildYahooScanUrl_,
+  rebaseYahooScanOffset_,
+  nextYahooScanOffset_,
+  mergeUniqueItemsById_,
+  runConditionsIndependently_
+} = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
 const MARKET_INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
@@ -233,6 +241,20 @@ async function sendToAppsScript(items, conditionId) {
   );
 }
 
+async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId) {
+  return postAppsScriptJson_(
+    {
+      secret: MARKET_INGEST_SECRET,
+      action: 'ackMarketScanCursor',
+      market: MARKET,
+      conditionId,
+      nextOffset,
+      lastItemId: String(lastItemId || '')
+    },
+    `Scan cursor ${conditionId}`
+  );
+}
+
 
 // ============================================================
 // 市場監視設定取得
@@ -335,7 +357,12 @@ async function getYahooConfigs() {
 
 
     validConfigs.push(
-      config
+      {
+        ...config,
+        scanOffset: Number.isInteger(Number(config.scanOffset))
+          ? Math.max(1, Number(config.scanOffset))
+          : defaultScanOffset_(MARKET)
+      }
     );
 
 
@@ -379,7 +406,7 @@ async function getYahooConfigs() {
 // Yahoo検索結果
 //
 // 役割:
-// 新しい出品を発見する。
+// 終了時間が近い出品を優先し、各条件の先頭と継続位置を走査する。
 //
 // Yahoo検索側が一時的に取得不能でも
 // 既存商品の詳細追跡は止めない。
@@ -387,7 +414,8 @@ async function getYahooConfigs() {
 
 async function scanYahooSearch(
   page,
-  config
+  config,
+  requestedOffset
 ) {
 
   const conditionId =
@@ -398,6 +426,17 @@ async function scanYahooSearch(
 
   const searchUrl =
     config.searchUrl;
+
+  const scanOffset = Number.isInteger(Number(requestedOffset))
+    ? Math.max(1, Number(requestedOffset))
+    : Number.isInteger(Number(config.scanOffset))
+      ? Math.max(1, Number(config.scanOffset))
+      : defaultScanOffset_(MARKET);
+  const pagedSearchUrl = buildYahooScanUrl_(
+    searchUrl,
+    scanOffset,
+    MAX_SEARCH_ITEMS
+  );
 
 
   console.log(
@@ -411,7 +450,7 @@ async function scanYahooSearch(
   );
 
   console.log(
-    '① Yahoo新着検索'
+    '① Yahoo終了時間が近い順検索'
   );
 
 
@@ -434,7 +473,7 @@ async function scanYahooSearch(
       if (attempt === 1) {
 
         await page.goto(
-          searchUrl,
+          pagedSearchUrl,
           {
             waitUntil: 'domcontentloaded',
             timeout: 60000
@@ -504,14 +543,25 @@ async function scanYahooSearch(
       '⚠️ 既存商品の価格追跡は継続します'
     );
 
-    return [];
+    return {
+      ok: false,
+      items: [],
+      rawRowsRead: 0,
+      rawItemIds: [],
+      lastRawItemId: ''
+    };
 
   }
 
 
-  const items =
+  const configuredMaxBuyPrice = Number(config.normalBuyLimit);
+  const maxBuyPrice = Number.isFinite(configuredMaxBuyPrice) && configuredMaxBuyPrice > 0
+    ? configuredMaxBuyPrice
+    : 29000;
+
+  const pageResult =
     await page.evaluate(
-      (MAX_SEARCH_ITEMS) => {
+      ({ MAX_SEARCH_ITEMS, maxBuyPrice }) => {
 
         function cleanText(text) {
 
@@ -527,10 +577,11 @@ async function scanYahooSearch(
             document.querySelectorAll(
               'li.Product'
             )
-          );
+          ).slice(0, MAX_SEARCH_ITEMS);
 
 
         const results = [];
+        const rawItemIds = [];
 
         const seen = new Set();
 
@@ -575,6 +626,8 @@ async function scanYahooSearch(
             }
 
           }
+
+          rawItemIds.push(itemId);
 
 
           if (
@@ -832,7 +885,7 @@ async function scanYahooSearch(
           if (
             !price ||
             price <= 0 ||
-            price > 29000
+            price > maxBuyPrice
           ) {
             continue;
           }
@@ -875,22 +928,26 @@ async function scanYahooSearch(
         }
 
 
-        return results;
+        return {
+          items: results,
+          rawRowsRead: cards.length,
+          rawItemIds
+        };
 
       },
 
-      MAX_SEARCH_ITEMS
+      { MAX_SEARCH_ITEMS, maxBuyPrice }
     );
 
 
   console.log(
-    '新着取得:',
-    items.length,
+    '仕入判定対象取得:',
+    pageResult.items.length,
     '件'
   );
 
 
-  items.forEach(
+  pageResult.items.forEach(
     (item, index) => {
 
       console.log(
@@ -904,7 +961,18 @@ async function scanYahooSearch(
   );
 
 
-  return items;
+  const lastRawItemId = pageResult.rawItemIds
+    .slice()
+    .reverse()
+    .find(Boolean) || '';
+
+  return {
+    ok: true,
+    items: pageResult.items,
+    rawRowsRead: pageResult.rawRowsRead,
+    rawItemIds: pageResult.rawItemIds,
+    lastRawItemId
+  };
 
 }
 
@@ -1942,14 +2010,9 @@ async function main() {
       new Map();
 
 
-    for (
-      let i = 0;
-      i < configs.length;
-      i++
-    ) {
-
-      const config =
-        configs[i];
+    const conditionFailures = await runConditionsIndependently_(
+      configs,
+      async (config, i) => {
 
 
       console.log(
@@ -1963,11 +2026,75 @@ async function main() {
       );
 
 
-      const searchItems =
+      const storedScanOffset = Number.isInteger(Number(config.scanOffset))
+        ? Math.max(1, Number(config.scanOffset))
+        : defaultScanOffset_(MARKET);
+      const storedLastItemId = String(config.lastItemId || '').trim();
+
+
+      // 毎回先頭10行も確認し、新着・終了間近の出品を拾う。
+      const headResult =
         await scanYahooSearch(
           searchPage,
-          config
+          config,
+          defaultScanOffset_(MARKET)
         );
+
+      let scanOffset = storedScanOffset;
+      let cursorMode = 'HEAD';
+      let coverageResult = headResult;
+      let lookbackResult = null;
+
+      if (storedScanOffset > defaultScanOffset_(MARKET)) {
+        if (storedLastItemId) {
+          const lookbackOffset = Math.max(
+            defaultScanOffset_(MARKET),
+            storedScanOffset - MAX_SEARCH_ITEMS
+          );
+          lookbackResult = await scanYahooSearch(
+            searchPage,
+            config,
+            lookbackOffset
+          );
+
+          if (!lookbackResult.ok) {
+            cursorMode = 'LOOKBACK_FAILED';
+            coverageResult = lookbackResult;
+          } else {
+            const rebased = rebaseYahooScanOffset_(
+              storedScanOffset,
+              storedLastItemId,
+              lookbackOffset,
+              lookbackResult.rawItemIds
+            );
+            scanOffset = rebased.offset;
+            cursorMode = rebased.mode;
+            coverageResult = scanOffset === defaultScanOffset_(MARKET)
+              ? headResult
+              : await scanYahooSearch(searchPage, config, scanOffset);
+          }
+        } else {
+          // 旧形式のoffsetだけでは、変動した検索結果を安全に再開できない。
+          scanOffset = defaultScanOffset_(MARKET);
+          cursorMode = 'RESET_ANCHOR_MISSING';
+          coverageResult = headResult;
+        }
+      }
+
+      console.log(
+        'Yahooカーソル:',
+        JSON.stringify({
+          mode: cursorMode,
+          storedOffset: storedScanOffset,
+          scanOffset,
+          lastItemId: storedLastItemId
+        })
+      );
+
+      const searchItems = mergeUniqueItemsById_(
+        headResult.ok ? headResult.items : [],
+        coverageResult.ok ? coverageResult.items : []
+      );
 
 
       // ======================================================
@@ -1989,6 +2116,26 @@ async function main() {
           searchItems,
           config.conditionId
         );
+
+      if (coverageResult.ok) {
+        const nextOffset = nextYahooScanOffset_(
+          scanOffset,
+          coverageResult.rawRowsRead
+        );
+        await acknowledgeMarketScanCursor_(
+          config.conditionId,
+          nextOffset,
+          coverageResult.lastRawItemId
+        );
+      } else {
+        // 取得に失敗した場合は保存済み位置を維持し、次回同じ位置から再試行する。
+        console.warn(
+          'Yahoo検索失敗。保存済みカーソルを維持します:',
+          config.conditionId,
+          cursorMode,
+          storedScanOffset
+        );
+      }
 
 
       console.log(
@@ -2073,7 +2220,35 @@ async function main() {
         500
       );
 
-    }
+      const failedStages = [];
+      if (!headResult.ok) failedStages.push('先頭');
+      if (lookbackResult && !lookbackResult.ok) {
+        failedStages.push('カーソル再確認');
+      }
+      if (
+        !coverageResult.ok &&
+        coverageResult !== headResult &&
+        coverageResult !== lookbackResult
+      ) {
+        failedStages.push('継続位置');
+      }
+
+      if (failedStages.length > 0) {
+        return {
+          ok: false,
+          error: 'Yahoo検索に失敗: ' + failedStages.join(', ')
+        };
+      }
+
+      return { ok: true };
+      },
+      failure => {
+        console.error(
+          '⚠️ 条件監視失敗。後続条件へ継続します:',
+          JSON.stringify(failure)
+        );
+      }
+    );
 
 
     await searchPage.close();
@@ -2107,6 +2282,17 @@ async function main() {
       context,
       trackedYahoo
     );
+
+    if (conditionFailures.length > 0) {
+      console.error(
+        '失敗条件一覧:',
+        JSON.stringify(conditionFailures)
+      );
+      throw new Error(
+        `Yahoo監視条件${conditionFailures.length}件に失敗しました。` +
+        '後続条件の走査と既存商品の追跡は完了しています。'
+      );
+    }
 
 
     console.log(

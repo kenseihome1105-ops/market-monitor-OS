@@ -2,10 +2,45 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  buildBackfillMonitorConditions_,
   scoreHistoricalTitleMatch_,
   selectHistoricalTargets_,
   shouldContinueHistoricalBackfill_
 } = require('./historical-backfill');
+
+test('Backfill target becomes one stable Mercari and Yahoo monitor condition', () => {
+  const target = {
+    dbItemId: 'DB/123',
+    brand: 'Example Brand',
+    product: 'Figure',
+    searchKeyword: 'Example Figure',
+    normalBuyLimit: 12000,
+    mercariBuyUrl: 'https://jp.mercari.com/search?keyword=Example',
+    yahooBuyUrl: 'https://auctions.yahoo.co.jp/search/search?p=Example'
+  };
+
+  const first = buildBackfillMonitorConditions_([target]);
+  const second = buildBackfillMonitorConditions_([target]);
+
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 2);
+  assert.deepEqual(first.map(x => x.market), ['メルカリ', 'ヤフオク']);
+  assert.deepEqual(first.map(x => x.conditionId), ['BF_M_DB%2F123', 'BF_Y_DB%2F123']);
+  assert.ok(first.every(x => x.dbItemId === 'DB/123'));
+  assert.ok(first.every(x => x.normalBuyLimit === 12000));
+});
+
+test('Backfill monitor registration rejects wrong hosts and incomplete targets', () => {
+  const result = buildBackfillMonitorConditions_([
+    { dbItemId: 'DB1', mercariBuyUrl: 'https://example.com/search?q=x' },
+    { dbItemId: '', yahooBuyUrl: 'https://auctions.yahoo.co.jp/search/search?p=x' },
+    { dbItemId: 'DB2', yahooBuyUrl: 'https://auctions.yahoo.co.jp/search/search?p=x' }
+  ]);
+
+  assert.equal(result.length, 1);
+  assert.equal(result[0].conditionId, 'BF_Y_DB2');
+  assert.equal(result[0].market, 'ヤフオク');
+});
 
 const balmainRareLeather = {
   brand: 'BALMAIN',

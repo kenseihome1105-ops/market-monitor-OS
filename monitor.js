@@ -1,4 +1,10 @@
 const { chromium } = require('playwright');
+const {
+  defaultScanOffset_,
+  CURSOR_LOOKAHEAD_ITEMS,
+  selectCursorBatch_,
+  mergeUniqueItemsById_
+} = require('./market-scan-cursor');
 
 
 // ============================================================
@@ -549,7 +555,12 @@ async function getMercariConfigs() {
 
 
     validConfigs.push(
-      config
+      {
+        ...config,
+        scanOffset: Number.isInteger(Number(config.scanOffset))
+          ? Math.max(0, Number(config.scanOffset))
+          : defaultScanOffset_(MARKET)
+      }
     );
 
 
@@ -757,31 +768,59 @@ async function dismissRegionGate(
 // ============================================================
 
 async function loadListings(
-  page
+  page,
+  targetCount
 ) {
 
-  for (
-    let i = 0;
-    i < 6;
-    i++
-  ) {
+  const MIN_SCROLLS = 6;
+  const MAX_SCROLLS = 180;
+  let scrolls = 0;
+  let stableAtBottom = 0;
+  let reachedBottom = false;
+  let loadedCount = 0;
 
-    await page.evaluate(
-      () => {
+  while (scrolls < MAX_SCROLLS) {
+    const before = await page.evaluate(() => ({
+      count: document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      ).length,
+      y: window.scrollY,
+      height: document.documentElement.scrollHeight,
+      viewport: window.innerHeight
+    }));
 
-        window.scrollBy(
-          0,
-          window.innerHeight * 1.5
-        );
+    loadedCount = before.count;
+    if (scrolls >= MIN_SCROLLS && loadedCount >= targetCount) break;
 
-      }
-    );
+    await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 1.5);
+    });
+    await page.waitForTimeout(500);
+    scrolls++;
 
+    const after = await page.evaluate(() => ({
+      count: document.querySelectorAll(
+        'a[href*="/item/m"], a[href*="/shops/product/"]'
+      ).length,
+      y: window.scrollY,
+      height: document.documentElement.scrollHeight,
+      viewport: window.innerHeight
+    }));
+    loadedCount = after.count;
 
-    await page.waitForTimeout(
-      700
-    );
+    if (scrolls >= MIN_SCROLLS && loadedCount >= targetCount) break;
 
+    const atBottom = after.y + after.viewport >= after.height - 20;
+    if (atBottom && after.count <= before.count) {
+      stableAtBottom++;
+    } else {
+      stableAtBottom = 0;
+    }
+
+    if (stableAtBottom >= 3) {
+      reachedBottom = true;
+      break;
+    }
   }
 
 
@@ -796,6 +835,14 @@ async function loadListings(
     }
   );
 
+  if (loadedCount < targetCount && !reachedBottom) {
+    throw new Error(
+      `Mercariの続き位置まで読み込めませんでした: ${loadedCount}/${targetCount}件`
+    );
+  }
+
+  return { loadedCount, reachedBottom };
+
 }
 
 
@@ -804,11 +851,10 @@ async function loadListings(
 // ============================================================
 
 async function extractMercariItems(
-  page,
-  maxItems
+  page
 ) {
 
-  const raw =
+  const extracted =
     await page.evaluate(
       () => {
 
@@ -826,6 +872,10 @@ async function extractMercariItems(
 
         const results =
           [];
+
+        const rawItemIds = [];
+
+        const seenRawItemIds = new Set();
 
 
         for (
@@ -847,6 +897,22 @@ async function extractMercariItems(
 
             continue;
 
+          }
+
+          let itemId = '';
+          try {
+            const pathname = new URL(href, location.origin).pathname;
+            const normal = pathname.match(/^\/item\/(m\d+)/i);
+            const shop = pathname.match(/^\/shops\/product\/([A-Za-z0-9_-]+)/i);
+            itemId = normal ? normal[1] : shop ? `shops:${shop[1]}` : '';
+          } catch (error) {
+            itemId = '';
+          }
+
+          if (!itemId) continue;
+          if (!seenRawItemIds.has(itemId)) {
+            seenRawItemIds.add(itemId);
+            rawItemIds.push(itemId);
           }
 
 
@@ -1033,6 +1099,8 @@ async function extractMercariItems(
 
           results.push({
 
+            itemId,
+
             href,
 
             title,
@@ -1044,7 +1112,10 @@ async function extractMercariItems(
         }
 
 
-        return results;
+        return {
+          items: results,
+          rawItemIds
+        };
 
       }
     );
@@ -1060,7 +1131,7 @@ async function extractMercariItems(
 
   for (
     const row
-    of raw
+    of extracted.items
   ) {
 
     const parsed =
@@ -1140,14 +1211,10 @@ async function extractMercariItems(
   }
 
 
-  return Array
-    .from(
-      map.values()
-    )
-    .slice(
-      0,
-      maxItems
-    );
+  return {
+    items: Array.from(map.values()),
+    rawItemIds: extracted.rawItemIds
+  };
 
 }
 
@@ -1181,6 +1248,20 @@ async function sendToAppsScript(
     `Ingest ${conditionId}`
   );
 
+}
+
+async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId) {
+  return postAppsScriptJson(
+    {
+      secret: INGEST_SECRET,
+      action: 'ackMarketScanCursor',
+      market: MARKET,
+      conditionId,
+      nextOffset,
+      lastItemId: String(lastItemId || '')
+    },
+    `Scan cursor ${conditionId}`
+  );
 }
 
 
@@ -3024,21 +3105,62 @@ async function scanMercariCondition(
   );
 
 
+  const scanOffset = Number.isInteger(Number(config.scanOffset))
+    ? Math.max(0, Number(config.scanOffset))
+    : defaultScanOffset_(MARKET);
+  const lastItemId = String(config.lastItemId || '').trim();
+  const targetCount = lastItemId
+    ? scanOffset + MAX_SEARCH_ITEMS + CURSOR_LOOKAHEAD_ITEMS
+    : MAX_SEARCH_ITEMS;
+
   await loadListings(
-    page
+    page,
+    targetCount
   );
 
 
-  const items =
+  const extracted =
     await extractMercariItems(
-      page,
-      MAX_SEARCH_ITEMS
+      page
     );
+
+  const itemById = new Map(
+    extracted.items.map(item => [item.itemId, item])
+  );
+  const rawItemIds = extracted.rawItemIds;
+
+  const batch = selectCursorBatch_(
+    rawItemIds,
+    lastItemId,
+    scanOffset,
+    MAX_SEARCH_ITEMS
+  );
+
+  const headItems = rawItemIds
+    .slice(0, MAX_SEARCH_ITEMS)
+    .map(itemId => itemById.get(itemId))
+    .filter(Boolean);
+  const continuationItems = batch.items
+    .map(itemId => itemById.get(itemId))
+    .filter(Boolean);
+  const items = mergeUniqueItemsById_(headItems, continuationItems);
 
 
   console.log(
     '取得商品数:',
     items.length
+  );
+  console.log(
+    'Mercariカーソル:',
+    JSON.stringify({
+      mode: batch.mode,
+      storedOffset: scanOffset,
+      startOffset: batch.startOffset,
+      lastItemId: lastItemId || '',
+      rawRowsAvailable: rawItemIds.length,
+      headItems: headItems.length,
+      continuationItems: continuationItems.length
+    })
   );
 
 
@@ -3056,9 +3178,20 @@ async function scanMercariCondition(
   }
 
 
-  if (
-    items.length === 0
-  ) {
+  if (!rawItemIds.length && (scanOffset > 0 || lastItemId)) {
+    await acknowledgeMarketScanCursor_(
+      config.conditionId,
+      defaultScanOffset_(MARKET),
+      ''
+    );
+    console.log(
+      'Mercari末尾まで走査済み。次回は先頭から再走査します:',
+      config.conditionId
+    );
+    return { received: 0, inserted: 0, updated: 0, insertedItems: [] };
+  }
+
+  if (!rawItemIds.length) {
 
     throw new Error(
       config.conditionId +
@@ -3073,6 +3206,16 @@ async function scanMercariCondition(
       items,
       config.conditionId
     );
+
+  await acknowledgeMarketScanCursor_(
+    config.conditionId,
+    batch.nextOffset === null
+      ? defaultScanOffset_(MARKET)
+      : batch.nextOffset,
+    batch.items.length
+      ? batch.items[batch.items.length - 1]
+      : ''
+  );
 
 
   console.log(
