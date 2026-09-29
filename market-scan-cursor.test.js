@@ -107,6 +107,32 @@ test('a failed Yahoo condition does not prevent later conditions from running', 
   }]);
 });
 
+
+test('a Yahoo scan result with ok:false is recorded and later conditions still run', async () => {
+  const visited = [];
+  const failures = await runConditionsIndependently_(
+    [
+      { conditionId: 'Y-05', searchName: 'first' },
+      { conditionId: 'Y-06', searchName: 'search unavailable' },
+      { conditionId: 'BF_Y_09KNIT-023', searchName: 'backfill target' }
+    ],
+    async config => {
+      visited.push(config.conditionId);
+      if (config.conditionId === 'Y-06') {
+        return { ok: false, error: 'Yahoo search unavailable' };
+      }
+      return { ok: true };
+    }
+  );
+
+  assert.deepEqual(visited, ['Y-05', 'Y-06', 'BF_Y_09KNIT-023']);
+  assert.deepEqual(failures, [{
+    conditionId: 'Y-06',
+    searchName: 'search unavailable',
+    error: 'Yahoo search unavailable'
+  }]);
+});
+
 test('Yahoo rebases to the prior item ID after rows disappear before it', () => {
   const priorWindowIds = listings(10).map(item => item.itemId);
   const result = rebaseYahooScanOffset_(31, 'item-8', 21, priorWindowIds);
