@@ -3,6 +3,7 @@ const {
   defaultScanOffset_,
   buildYahooScanUrl_,
   rebaseYahooScanOffset_,
+  normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   mergeUniqueItemsById_,
   runConditionsIndependently_
@@ -455,6 +456,7 @@ async function scanYahooSearch(
 
 
   let cardFound = false;
+  let everyAttemptWasSuccessfulEmptyPage = true;
 
 
   for (
@@ -470,9 +472,11 @@ async function scanYahooSearch(
       );
 
 
+      let response = null;
+
       if (attempt === 1) {
 
-        await page.goto(
+        response = await page.goto(
           pagedSearchUrl,
           {
             waitUntil: 'domcontentloaded',
@@ -482,7 +486,7 @@ async function scanYahooSearch(
 
       } else {
 
-        await page.reload({
+        response = await page.reload({
           waitUntil: 'domcontentloaded',
           timeout: 60000
         });
@@ -490,33 +494,56 @@ async function scanYahooSearch(
       }
 
 
-      await page.waitForTimeout(
-        3000
-      );
-
-
-      const count =
-        await page.locator(
-          'li.Product'
-        ).count();
-
+      const status =
+        response && typeof response.status === 'function'
+          ? Number(response.status())
+          : 0;
 
       console.log(
-        '商品カード数:',
-        count
+        'Yahoo検索HTTP:',
+        status || 'NO_RESPONSE'
       );
 
+      if (
+        status < 200 ||
+        status >= 400
+      ) {
 
-      if (count > 0) {
+        everyAttemptWasSuccessfulEmptyPage = false;
 
-        cardFound = true;
+      } else {
 
-        break;
+        await page.waitForTimeout(
+          3000
+        );
+
+
+        const count =
+          await page.locator(
+            'li.Product'
+          ).count();
+
+
+        console.log(
+          '商品カード数:',
+          count
+        );
+
+
+        if (count > 0) {
+
+          cardFound = true;
+
+          break;
+
+        }
 
       }
 
 
     } catch (error) {
+
+      everyAttemptWasSuccessfulEmptyPage = false;
 
       console.log(
         '検索試行失敗:',
@@ -545,6 +572,9 @@ async function scanYahooSearch(
 
     return {
       ok: false,
+      failureReason: everyAttemptWasSuccessfulEmptyPage
+        ? 'NO_PRODUCT_CARDS'
+        : 'SEARCH_RETRY_FAILED',
       items: [],
       rawRowsRead: 0,
       rawItemIds: [],
@@ -2081,13 +2111,35 @@ async function main() {
         }
       }
 
+      const unresolvedCoverageResult = coverageResult;
+      coverageResult = normalizeYahooContinuationResult_(
+        headResult,
+        lookbackResult,
+        coverageResult
+      );
+
+      if (
+        coverageResult !== unresolvedCoverageResult &&
+        coverageResult.endOfResults === true
+      ) {
+        cursorMode = 'END_OF_RESULTS';
+        scanOffset = defaultScanOffset_(MARKET);
+
+        console.warn(
+          'Yahoo継続位置に商品カードがありません。結果終端としてカーソルを先頭へ戻します:',
+          config.conditionId
+        );
+      }
+
       console.log(
         'Yahooカーソル:',
         JSON.stringify({
           mode: cursorMode,
           storedOffset: storedScanOffset,
           scanOffset,
-          lastItemId: storedLastItemId
+          lastItemId: coverageResult.endOfResults
+            ? ''
+            : storedLastItemId
         })
       );
 

@@ -166,6 +166,41 @@ function rebaseYahooScanOffset_(storedOffset, lastItemId, lookbackOffset, rawIte
   return { offset: 1, mode: 'RESET_ANCHOR_MISSING' };
 }
 
+/**
+ * An empty continuation page is a valid end-of-results only when the head
+ * and any lookback page both loaded successfully. Resetting to the head lets
+ * mutable Yahoo results be scanned again next run without advancing past data.
+ */
+function normalizeYahooContinuationResult_(headResult, lookbackResult, continuationResult) {
+  const priorPagesSucceeded =
+    headResult &&
+    headResult.ok === true &&
+    (!lookbackResult || lookbackResult.ok === true);
+  const isDistinctContinuation =
+    Boolean(continuationResult) &&
+    continuationResult !== headResult &&
+    continuationResult !== lookbackResult;
+
+  if (
+    !priorPagesSucceeded ||
+    !isDistinctContinuation ||
+    continuationResult.ok !== false ||
+    continuationResult.failureReason !== 'NO_PRODUCT_CARDS'
+  ) {
+    return continuationResult;
+  }
+
+  return {
+    ...continuationResult,
+    ok: true,
+    items: [],
+    rawRowsRead: 0,
+    rawItemIds: [],
+    lastRawItemId: '',
+    endOfResults: true
+  };
+}
+
 /** Advance Yahoo by raw result rows, independent of title/price filtering. */
 function nextYahooScanOffset_(currentOffset, rawRowsRead) {
   const current = Number(currentOffset);
@@ -218,6 +253,7 @@ module.exports = {
   mergeUniqueItemsById_,
   runConditionsIndependently_,
   rebaseYahooScanOffset_,
+  normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   buildYahooScanUrl_
 };
