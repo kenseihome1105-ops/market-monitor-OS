@@ -108,7 +108,12 @@ async function runConditionsIndependently_(configs, runCondition, onFailure) {
   for (let index = 0; index < configs.length; index++) {
     const config = configs[index] || {};
     try {
-      await runCondition(config, index);
+      const result = await runCondition(config, index);
+      if (result && typeof result === 'object' && result.ok === false) {
+        throw new Error(
+          String(result.error || '条件処理がok:falseを返しました')
+        );
+      }
     } catch (error) {
       const failure = {
         conditionId: String(config.conditionId || '').trim(),
