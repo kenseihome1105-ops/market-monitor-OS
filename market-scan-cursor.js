@@ -244,6 +244,45 @@ function buildYahooScanUrl_(searchUrl, oneBasedOffset, pageSize = MAX_SCAN_ITEMS
   return url.toString();
 }
 
+function conditionShardIndex_(conditionId, shardCount) {
+  const id = String(conditionId || '').trim();
+  const count = Number(shardCount);
+  if (!id) {
+    throw new Error('conditionId must be non-empty');
+  }
+  if (!Number.isInteger(count) || count < 1 || count > 64) {
+    throw new RangeError('shardCount must be an integer from 1 to 64');
+  }
+
+  let hash = 2166136261;
+  for (let i = 0; i < id.length; i++) {
+    hash ^= id.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % count;
+}
+
+function selectConditionShard_(configs, shardIndex, shardCount) {
+  if (!Array.isArray(configs)) {
+    throw new TypeError('configs must be an array');
+  }
+  const count = Number(shardCount);
+  const index = Number(shardIndex);
+  if (!Number.isInteger(index) || !Number.isInteger(count) || count < 1 || count > 64 || index < 0 || index >= count) {
+    throw new RangeError('shardIndex must be between 0 and shardCount - 1');
+  }
+
+  return configs.filter(config =>
+    conditionShardIndex_(config && config.conditionId, count) === index
+  );
+}
+
+function shouldRetryYahooSearchStatus_(status) {
+  const code = Number(status);
+  if (!Number.isInteger(code)) return true;
+  return code === 0 || code === 408 || code === 425 || code === 429 || code >= 500;
+}
+
 module.exports = {
   MAX_SCAN_ITEMS,
   CURSOR_LOOKAHEAD_ITEMS,
@@ -255,5 +294,8 @@ module.exports = {
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  conditionShardIndex_,
+  selectConditionShard_,
+  shouldRetryYahooSearchStatus_
 };
