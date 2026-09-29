@@ -9,6 +9,7 @@ const {
   selectOffsetBatch_,
   selectCursorBatch_,
   mergeUniqueItemsById_,
+  runConditionsIndependently_,
   rebaseYahooScanOffset_,
   nextYahooScanOffset_,
   buildYahooScanUrl_
@@ -80,6 +81,30 @@ test('head and continuation lanes merge once per item ID', () => {
     { itemId: 'b' },
     { itemId: 'c' }
   ]);
+});
+
+test('a failed Yahoo condition does not prevent later conditions from running', async () => {
+  const visited = [];
+  const failures = await runConditionsIndependently_(
+    [
+      { conditionId: 'Y-05', searchName: 'first' },
+      { conditionId: 'Y-06', searchName: 'transient failure' },
+      { conditionId: 'BF_Y_09KNIT-023', searchName: 'backfill target' }
+    ],
+    async config => {
+      visited.push(config.conditionId);
+      if (config.conditionId === 'Y-06') {
+        throw new Error('temporary Apps Script response error');
+      }
+    }
+  );
+
+  assert.deepEqual(visited, ['Y-05', 'Y-06', 'BF_Y_09KNIT-023']);
+  assert.deepEqual(failures, [{
+    conditionId: 'Y-06',
+    searchName: 'transient failure',
+    error: 'temporary Apps Script response error'
+  }]);
 });
 
 test('Yahoo rebases to the prior item ID after rows disappear before it', () => {

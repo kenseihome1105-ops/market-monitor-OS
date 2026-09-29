@@ -4,7 +4,8 @@ const {
   buildYahooScanUrl_,
   rebaseYahooScanOffset_,
   nextYahooScanOffset_,
-  mergeUniqueItemsById_
+  mergeUniqueItemsById_,
+  runConditionsIndependently_
 } = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -2009,14 +2010,9 @@ async function main() {
       new Map();
 
 
-    for (
-      let i = 0;
-      i < configs.length;
-      i++
-    ) {
-
-      const config =
-        configs[i];
+    const conditionFailures = await runConditionsIndependently_(
+      configs,
+      async (config, i) => {
 
 
       console.log(
@@ -2215,8 +2211,14 @@ async function main() {
       await sleep(
         500
       );
-
-    }
+      },
+      failure => {
+        console.error(
+          '⚠️ 条件監視失敗。後続条件へ継続します:',
+          JSON.stringify(failure)
+        );
+      }
+    );
 
 
     await searchPage.close();
@@ -2250,6 +2252,17 @@ async function main() {
       context,
       trackedYahoo
     );
+
+    if (conditionFailures.length > 0) {
+      console.error(
+        '失敗条件一覧:',
+        JSON.stringify(conditionFailures)
+      );
+      throw new Error(
+        `Yahoo監視条件${conditionFailures.length}件に失敗しました。` +
+        '後続条件の走査と既存商品の追跡は完了しています。'
+      );
+    }
 
 
     console.log(

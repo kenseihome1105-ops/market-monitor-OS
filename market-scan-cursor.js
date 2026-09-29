@@ -92,6 +92,39 @@ function mergeUniqueItemsById_(...batches) {
   return Array.from(byId.values());
 }
 
+/** Run each marketplace condition independently so one transient ingest error
+ * cannot prevent later conditions from being scanned. Errors are returned for
+ * a final workflow failure after the remaining conditions finish.
+ */
+async function runConditionsIndependently_(configs, runCondition, onFailure) {
+  if (!Array.isArray(configs)) {
+    throw new TypeError('configs must be an array');
+  }
+  if (typeof runCondition !== 'function') {
+    throw new TypeError('runCondition must be a function');
+  }
+
+  const failures = [];
+  for (let index = 0; index < configs.length; index++) {
+    const config = configs[index] || {};
+    try {
+      await runCondition(config, index);
+    } catch (error) {
+      const failure = {
+        conditionId: String(config.conditionId || '').trim(),
+        searchName: String(config.searchName || '').trim(),
+        error: error && error.message ? error.message : String(error)
+      };
+      failures.push(failure);
+      if (typeof onFailure === 'function') {
+        onFailure(failure, index, config);
+      }
+    }
+  }
+
+  return failures;
+}
+
 /**
  * Rebase Yahoo's one-based offset by locating the prior page-boundary ID in
  * the current lookback page. If the anchor expired or moved outside the
@@ -178,6 +211,7 @@ module.exports = {
   selectOffsetBatch_,
   selectCursorBatch_,
   mergeUniqueItemsById_,
+  runConditionsIndependently_,
   rebaseYahooScanOffset_,
   nextYahooScanOffset_,
   buildYahooScanUrl_
