@@ -76,6 +76,18 @@ function looksLikeAppsScriptHtml_(text, contentType) {
 }
 
 async function postAppsScriptJson_(payload, label) {
+  const startedAt = Date.now();
+  try {
+    return await postAppsScriptJsonWithRetry_(payload, label);
+  } finally {
+    console.log(
+      '[TIMING] Apps Script POST:',
+      JSON.stringify({ label, elapsedMs: Date.now() - startedAt })
+    );
+  }
+}
+
+async function postAppsScriptJsonWithRetry_(payload, label) {
   let lastError = null;
 
   for (
@@ -414,6 +426,26 @@ async function getYahooConfigs() {
 // ============================================================
 
 async function scanYahooSearch(
+  page,
+  config,
+  requestedOffset
+) {
+  const startedAt = Date.now();
+  try {
+    return await scanYahooSearchImpl_(page, config, requestedOffset);
+  } finally {
+    console.log(
+      '[TIMING] Yahoo search pass:',
+      JSON.stringify({
+        conditionId: config && config.conditionId || '',
+        offset: requestedOffset,
+        elapsedMs: Date.now() - startedAt
+      })
+    );
+  }
+}
+
+async function scanYahooSearchImpl_(
   page,
   config,
   requestedOffset
@@ -1897,11 +1929,21 @@ async function trackExistingYahooItems(
     );
 
 
+    const trackedStartedAt = Date.now();
     const update =
       await scanTrackedYahooItem(
         page,
         trackedItem
       );
+    console.log(
+      '[TIMING] Yahoo tracked item:',
+      JSON.stringify({
+        conditionId: trackedItem.conditionId || '',
+        itemId: trackedItem.itemId || '',
+        elapsedMs: Date.now() - trackedStartedAt,
+        updated: !!update
+      })
+    );
 
 
     if (!update) {
