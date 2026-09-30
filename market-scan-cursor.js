@@ -244,6 +244,31 @@ function buildYahooScanUrl_(searchUrl, oneBasedOffset, pageSize = MAX_SCAN_ITEMS
   return url.toString();
 }
 
+/**
+ * Accept Yahoo HTTP 404 only when it is the official search-results route and
+ * verified product cards are present. An empty or unrelated 404 must fail
+ * closed so the caller cannot advance its scan cursor.
+ */
+function shouldAcceptYahoo404Search_(status, responseUrl, title, productCardCount) {
+  if (Number(status) !== 404 || Number(productCardCount) < 1) {
+    return false;
+  }
+
+  let url;
+  try {
+    url = new URL(String(responseUrl || ''));
+  } catch (error) {
+    return false;
+  }
+
+  return (
+    url.protocol === 'https:' &&
+    url.hostname === 'auctions.yahoo.co.jp' &&
+    url.pathname === '/search/search' &&
+    String(title || '').includes('Yahoo!オークション')
+  );
+}
+
 module.exports = {
   MAX_SCAN_ITEMS,
   CURSOR_LOOKAHEAD_ITEMS,
@@ -255,5 +280,6 @@ module.exports = {
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  shouldAcceptYahoo404Search_
 };
