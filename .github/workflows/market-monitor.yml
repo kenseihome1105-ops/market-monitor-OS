@@ -2,7 +2,7 @@ name: Market Monitor Test
 
 on:
   schedule:
-    - cron: "0,30 * * * *"
+    - cron: "0 */4 * * *"
   workflow_dispatch:
 
 concurrency:
