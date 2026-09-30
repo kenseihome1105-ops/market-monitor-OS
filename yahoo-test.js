@@ -6,7 +6,9 @@ const {
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   mergeUniqueItemsById_,
-  runConditionsIndependently_
+  runConditionsIndependently_,
+  selectConditionShard_,
+  shouldRetryYahooSearchStatus_
 } = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -391,14 +393,25 @@ async function getYahooConfigs() {
   }
 
 
+  const shardIndex = Number(process.env.YAHOO_TEST_SHARD_INDEX || 0);
+  const shardCount = Number(process.env.YAHOO_TEST_SHARD_COUNT || 1);
+  const selectedConfigs = selectConditionShard_(validConfigs, shardIndex, shardCount);
+
   console.log(
     'Yahoo ON条件:',
     validConfigs.length,
     '件'
   );
+  console.log(
+    'Yahoo condition shard:',
+    JSON.stringify({
+      index: shardIndex,
+      count: shardCount,
+      selected: selectedConfigs.length
+    })
+  );
 
-
-  return validConfigs;
+  return selectedConfigs;
 
 }
 
@@ -457,6 +470,7 @@ async function scanYahooSearch(
 
   let cardFound = false;
   let everyAttemptWasSuccessfulEmptyPage = true;
+  let lastHttpStatus = 0;
 
 
   for (
@@ -510,6 +524,33 @@ async function scanYahooSearch(
       ) {
 
         everyAttemptWasSuccessfulEmptyPage = false;
+        lastHttpStatus = status;
+
+        if (!shouldRetryYahooSearchStatus_(status)) {
+          const pageTitle = await page.title().catch(() => '');
+          const bodyText = await page.locator('body')
+            .innerText({ timeout: 5000 })
+            .catch(() => '');
+          let responsePath = '';
+          try {
+            responsePath = new URL(page.url()).pathname;
+          } catch (error) {
+            responsePath = '';
+          }
+
+          console.warn(
+            'Yahoo検索HTTPエラー詳細:',
+            JSON.stringify({
+              conditionId,
+              status,
+              requestedOffset: scanOffset,
+              responsePath,
+              pageTitle,
+              bodyExcerpt: String(bodyText).replace(/\s+/g, ' ').trim().slice(0, 240)
+            })
+          );
+          break;
+        }
 
         // 最終のHTTPエラー応答だけ、404の原因確認用に安全な範囲で記録する。
         // 検索語を含むクエリ文字列はログへ出さず、再試行・カーソル処理も変更しない。
@@ -606,9 +647,11 @@ async function scanYahooSearch(
 
     return {
       ok: false,
-      failureReason: everyAttemptWasSuccessfulEmptyPage
-        ? 'NO_PRODUCT_CARDS'
-        : 'SEARCH_RETRY_FAILED',
+      failureReason: lastHttpStatus >= 400
+        ? `HTTP_${lastHttpStatus}`
+        : everyAttemptWasSuccessfulEmptyPage
+          ? 'NO_PRODUCT_CARDS'
+          : 'SEARCH_RETRY_FAILED',
       items: [],
       rawRowsRead: 0,
       rawItemIds: [],
@@ -2115,11 +2158,13 @@ async function main() {
             defaultScanOffset_(MARKET),
             storedScanOffset - MAX_SEARCH_ITEMS
           );
-          lookbackResult = await scanYahooSearch(
-            searchPage,
-            config,
-            lookbackOffset
-          );
+          lookbackResult = lookbackOffset === defaultScanOffset_(MARKET)
+            ? headResult
+            : await scanYahooSearch(
+                searchPage,
+                config,
+                lookbackOffset
+              );
 
           if (!lookbackResult.ok) {
             cursorMode = 'LOOKBACK_FAILED';

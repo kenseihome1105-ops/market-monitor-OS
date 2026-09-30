@@ -13,7 +13,10 @@ const {
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  conditionShardIndex_,
+  selectConditionShard_,
+  shouldRetryYahooSearchStatus_
 } = require('./market-scan-cursor');
 
 function listings(count) {
@@ -269,4 +272,45 @@ test('Yahoo pagination changes only its one-based start and page size', () => {
 test('invalid offsets and non-Yahoo URLs fail closed', () => {
   assert.throws(() => selectOffsetBatch_(listings(1), -1), /offset/);
   assert.throws(() => buildYahooScanUrl_('https://example.com/search', 1), /Yahoo/);
+});
+
+
+test('condition shards cover all configured conditions exactly once and remain stable when order changes', () => {
+  const configs = Array.from({ length: 47 }, (_, index) => ({
+    conditionId: `M-${String(index + 1).padStart(2, '0')}`
+  }));
+  const assignment = new Map();
+
+  for (let shardIndex = 0; shardIndex < 6; shardIndex++) {
+    const shard = selectConditionShard_(configs, shardIndex, 6);
+    assert.ok(shard.length > 0);
+    for (const config of shard) {
+      assert.equal(conditionShardIndex_(config.conditionId, 6), shardIndex);
+      assert.equal(assignment.has(config.conditionId), false);
+      assignment.set(config.conditionId, shardIndex);
+    }
+  }
+
+  assert.equal(assignment.size, configs.length);
+  for (const config of [...configs].reverse()) {
+    assert.equal(
+      conditionShardIndex_(config.conditionId, 6),
+      assignment.get(config.conditionId)
+    );
+  }
+});
+
+test('condition shard configuration rejects invalid input', () => {
+  assert.throws(() => conditionShardIndex_('', 2), /conditionId/);
+  assert.throws(() => selectConditionShard_([], 2, 2), /shardIndex/);
+  assert.throws(() => selectConditionShard_([], 0, 0), /shardIndex/);
+});
+
+test('Yahoo search retries transient statuses but stops on permanent 4xx responses', () => {
+  for (const status of [0, 408, 425, 429, 500, 502, 503, 504, 599]) {
+    assert.equal(shouldRetryYahooSearchStatus_(status), true, String(status));
+  }
+  for (const status of [200, 400, 401, 403, 404]) {
+    assert.equal(shouldRetryYahooSearchStatus_(status), false, String(status));
+  }
 });

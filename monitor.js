@@ -3,7 +3,8 @@ const {
   defaultScanOffset_,
   CURSOR_LOOKAHEAD_ITEMS,
   selectCursorBatch_,
-  mergeUniqueItemsById_
+  mergeUniqueItemsById_,
+  selectConditionShard_
 } = require('./market-scan-cursor');
 const { shouldRetryAppsScriptResult_ } = require('./apps-script-retry');
 
@@ -610,14 +611,25 @@ async function getMercariConfigs() {
   }
 
 
+  const shardIndex = Number(process.env.MARKET_MONITOR_SHARD_INDEX || 0);
+  const shardCount = Number(process.env.MARKET_MONITOR_SHARD_COUNT || 1);
+  const selectedConfigs = selectConditionShard_(validConfigs, shardIndex, shardCount);
+
   console.log(
     'Mercari ON条件:',
     validConfigs.length,
     '件'
   );
+  console.log(
+    'Mercari condition shard:',
+    JSON.stringify({
+      index: shardIndex,
+      count: shardCount,
+      selected: selectedConfigs.length
+    })
+  );
 
-
-  return validConfigs;
+  return selectedConfigs;
 
 }
 

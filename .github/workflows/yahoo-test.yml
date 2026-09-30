@@ -5,13 +5,17 @@ on:
     - cron: "34 2-22/4 * * *"
   workflow_dispatch:
 
-concurrency:
-  group: market-monitor-os-production
-  queue: max
-  cancel-in-progress: false
-
 jobs:
   yahoo-test:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        shard: [0, 1]
+    concurrency:
+      group: market-monitor-os-yahoo-shard-${{ matrix.shard }}
+      queue: single
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,4 +36,6 @@ jobs:
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+          YAHOO_TEST_SHARD_INDEX: ${{ matrix.shard }}
+          YAHOO_TEST_SHARD_COUNT: "2"
         run: node yahoo-test.js

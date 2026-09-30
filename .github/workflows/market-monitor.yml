@@ -5,13 +5,17 @@ on:
     - cron: "0 */4 * * *"
   workflow_dispatch:
 
-concurrency:
-  group: market-monitor-os-production
-  queue: max
-  cancel-in-progress: false
-
 jobs:
   monitor:
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5]
+    concurrency:
+      group: market-monitor-os-mercari-shard-${{ matrix.shard }}
+      queue: single
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -32,4 +36,6 @@ jobs:
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
+          MARKET_MONITOR_SHARD_INDEX: ${{ matrix.shard }}
+          MARKET_MONITOR_SHARD_COUNT: "6"
         run: npm run monitor

@@ -8,13 +8,12 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: market-monitor-os-production
-  queue: max
-  cancel-in-progress: false
-
 jobs:
   historical-backfill:
+    concurrency:
+      group: market-monitor-os-historical-backfill
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
