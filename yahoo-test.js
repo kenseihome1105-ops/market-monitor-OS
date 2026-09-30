@@ -511,6 +511,40 @@ async function scanYahooSearch(
 
         everyAttemptWasSuccessfulEmptyPage = false;
 
+        // 最終のHTTPエラー応答だけ、404の原因確認用に安全な範囲で記録する。
+        // 検索語を含むクエリ文字列はログへ出さず、再試行・カーソル処理も変更しない。
+        if (response && status >= 400 && attempt === 3) {
+          const diagnostic = {
+            status
+          };
+
+          try {
+            diagnostic.responsePath = new URL(response.url()).pathname;
+          } catch (error) {
+            diagnostic.responsePath = '';
+          }
+
+          try {
+            diagnostic.title = await page.title();
+          } catch (error) {
+            diagnostic.title = '';
+          }
+
+          try {
+            diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+              .replace(/\s+/g, ' ')
+              .replace(/https?:\/\/\S+/g, '[URL]')
+              .slice(0, 240);
+          } catch (error) {
+            diagnostic.bodySnippet = '[本文を取得できません]';
+          }
+
+          console.warn(
+            'Yahoo検索HTTPエラー詳細:',
+            JSON.stringify(diagnostic)
+          );
+        }
+
       } else {
 
         await page.waitForTimeout(
