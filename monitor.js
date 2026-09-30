@@ -180,6 +180,24 @@ async function postAppsScriptJson(
   label
 ) {
 
+  const startedAt = Date.now();
+
+  try {
+    return await postAppsScriptJsonWithRetry_(payload, label);
+  } finally {
+    console.log(
+      '[TIMING] Apps Script POST:',
+      JSON.stringify({ label, elapsedMs: Date.now() - startedAt })
+    );
+  }
+}
+
+
+async function postAppsScriptJsonWithRetry_(
+  payload,
+  label
+) {
+
   let lastError =
     null;
 
@@ -860,7 +878,7 @@ async function loadListings(
     );
   }
 
-  return { loadedCount, reachedBottom };
+  return { loadedCount, reachedBottom, scrolls, targetCount };
 
 }
 
@@ -3132,9 +3150,21 @@ async function scanMercariCondition(
     ? scanOffset + MAX_SEARCH_ITEMS + CURSOR_LOOKAHEAD_ITEMS
     : MAX_SEARCH_ITEMS;
 
-  await loadListings(
+  const listingLoadStartedAt = Date.now();
+  const listingLoadStats = await loadListings(
     page,
     targetCount
+  );
+  console.log(
+    '[TIMING] Mercari DOM load:',
+    JSON.stringify({
+      conditionId: config.conditionId,
+      elapsedMs: Date.now() - listingLoadStartedAt,
+      targetCount,
+      loadedCount: listingLoadStats.loadedCount,
+      scrolls: listingLoadStats.scrolls,
+      reachedBottom: listingLoadStats.reachedBottom
+    })
   );
 
 
@@ -3299,10 +3329,21 @@ async function scanMercariCondition(
   // DB同定済みMarket Comps対象だけYahooへ流す
   // ========================================================
 
-  await runYahooMarketCompsForInsertedItems_(
+  const marketCompsStartedAt = Date.now();
+  const marketCompsResult = await runYahooMarketCompsForInsertedItems_(
     page,
     insertedItems,
     config
+  );
+  console.log(
+    '[TIMING] Market Comps batch:',
+    JSON.stringify({
+      conditionId: config.conditionId,
+      elapsedMs: Date.now() - marketCompsStartedAt,
+      attempted: marketCompsResult.attempted,
+      succeeded: marketCompsResult.succeeded,
+      failed: marketCompsResult.failed
+    })
   );
 
 
