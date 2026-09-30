@@ -2,7 +2,7 @@ name: Historical Backfill Batch
 
 on:
   schedule:
-    - cron: "20,50 * * * *"
+    - cron: "45 3-23/4 * * *"
   workflow_dispatch:
 
 permissions:
