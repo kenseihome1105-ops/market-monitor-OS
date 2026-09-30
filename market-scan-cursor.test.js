@@ -13,7 +13,8 @@ const {
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  shouldAcceptYahoo404Search_
 } = require('./market-scan-cursor');
 
 function listings(count) {
@@ -269,4 +270,47 @@ test('Yahoo pagination changes only its one-based start and page size', () => {
 test('invalid offsets and non-Yahoo URLs fail closed', () => {
   assert.throws(() => selectOffsetBatch_(listings(1), -1), /offset/);
   assert.throws(() => buildYahooScanUrl_('https://example.com/search', 1), /Yahoo/);
+});
+
+
+test('Yahoo 404 search responses are accepted only with verified product cards', () => {
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      '【2026年最新】Yahoo!オークション -Kiton スーツの中古品一覧',
+      3
+    ),
+    true
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      '【2026年最新】Yahoo!オークション -Kiton スーツの中古品一覧',
+      0
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://example.com/search/search?p=Kiton',
+      'Yahoo!オークション -Kiton',
+      3
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      503,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      'Yahoo!オークション -Kiton',
+      3
+    ),
+    false
+  );
 });

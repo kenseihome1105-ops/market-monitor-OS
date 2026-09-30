@@ -6,7 +6,8 @@ const {
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   mergeUniqueItemsById_,
-  runConditionsIndependently_
+  runConditionsIndependently_,
+  shouldAcceptYahoo404Search_
 } = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -504,7 +505,77 @@ async function scanYahooSearch(
         status || 'NO_RESPONSE'
       );
 
-      if (
+      if (status === 404) {
+
+        // Yahoo may return HTTP 404 with a valid results page. Only recover
+        // when the official results route and product cards are verified.
+        // A cardless 404 remains a failure, so the scan cursor is not advanced.
+        everyAttemptWasSuccessfulEmptyPage = false;
+
+        const count = await page.locator('li.Product').count();
+        let responseUrl = '';
+        let title = '';
+
+        try {
+          responseUrl = response && typeof response.url === 'function'
+            ? response.url()
+            : '';
+        } catch (error) {
+          responseUrl = '';
+        }
+
+        try {
+          title = await page.title();
+        } catch (error) {
+          title = '';
+        }
+
+        const acceptedAsSearchResults = shouldAcceptYahoo404Search_(
+          status,
+          responseUrl,
+          title,
+          count
+        );
+
+        if (acceptedAsSearchResults) {
+          console.warn(
+            'Yahoo検索HTTP 404だが正規検索ページに商品カードあり。取得を続行します:',
+            JSON.stringify({ conditionId, productCardCount: count })
+          );
+          cardFound = true;
+          break;
+        }
+
+        if (attempt === 3) {
+          const diagnostic = {
+            status,
+            productCardCount: count
+          };
+
+          try {
+            diagnostic.responsePath = new URL(responseUrl).pathname;
+          } catch (error) {
+            diagnostic.responsePath = '';
+          }
+
+          diagnostic.title = title;
+
+          try {
+            diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+              .replace(/\s+/g, ' ')
+              .replace(/https?:\/\/\S+/g, '[URL]')
+              .slice(0, 240);
+          } catch (error) {
+            diagnostic.bodySnippet = '[本文を取得できません]';
+          }
+
+          console.warn(
+            'Yahoo検索HTTPエラー詳細:',
+            JSON.stringify(diagnostic)
+          );
+        }
+
+      } else if (
         status < 200 ||
         status >= 400
       ) {
