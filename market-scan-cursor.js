@@ -269,6 +269,46 @@ function shouldAcceptYahoo404Search_(status, responseUrl, title, productCardCoun
   );
 }
 
+
+function isYahooSearchResultsPage_(responseUrl, title) {
+  let url;
+  try {
+    url = new URL(String(responseUrl || ''));
+  } catch (error) {
+    return false;
+  }
+
+  return (
+    url.protocol === 'https:' &&
+    url.hostname === 'auctions.yahoo.co.jp' &&
+    url.pathname === '/search/search' &&
+    String(title || '').includes('Yahoo!オークション')
+  );
+}
+
+
+function areAllYahooSearchResultsGlobalFailures_(results) {
+  return (
+    Array.isArray(results) &&
+    results.length > 0 &&
+    results.every(result =>
+      result && result.globalUpstreamFailure === true
+    )
+  );
+}
+
+function shouldOpenYahooSearchCircuit_(consecutiveGlobalFailures, threshold = 3) {
+  const failures = Number(consecutiveGlobalFailures);
+  const limit = Number(threshold);
+  return (
+    Number.isInteger(failures) &&
+    failures >= 1 &&
+    Number.isInteger(limit) &&
+    limit >= 1 &&
+    failures >= limit
+  );
+}
+
 module.exports = {
   MAX_SCAN_ITEMS,
   CURSOR_LOOKAHEAD_ITEMS,
@@ -281,5 +321,8 @@ module.exports = {
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   buildYahooScanUrl_,
-  shouldAcceptYahoo404Search_
+  shouldAcceptYahoo404Search_,
+  isYahooSearchResultsPage_,
+  shouldOpenYahooSearchCircuit_,
+  areAllYahooSearchResultsGlobalFailures_
 };
