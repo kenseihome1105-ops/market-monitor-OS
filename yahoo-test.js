@@ -18,6 +18,10 @@ const MARKET = 'ヤフオク';
 const MAX_SEARCH_ITEMS = 10;
 const MAX_TRACKED_ITEMS = 30;
 
+// 200 OKでYahoo検索HTMLが返っても商品カードがない場合の診断ログ上限。
+const MAX_EMPTY_RESULT_DIAGNOSTICS_PER_RUN = 3;
+let emptyResultDiagnosticsLogged = 0;
+
 
 // ============================================================
 // 共通
@@ -633,6 +637,60 @@ async function scanYahooSearch(
           '商品カード数:',
           count
         );
+
+
+        // HTTP 200でも検索カードが取れないページの種類を、最大3件だけ記録する。
+        // 検索処理・再試行・カーソル更新の判定は変更しない。
+        if (
+          count === 0 &&
+          attempt === 3 &&
+          emptyResultDiagnosticsLogged < MAX_EMPTY_RESULT_DIAGNOSTICS_PER_RUN
+        ) {
+          emptyResultDiagnosticsLogged++;
+
+          const diagnostic = {
+            conditionId,
+            status,
+            responseHost: '',
+            responsePath: '',
+            title: '',
+            bodySnippet: ''
+          };
+
+          try {
+            const responseUrl =
+              response && typeof response.url === 'function'
+                ? response.url()
+                : '';
+            const parsedUrl = new URL(responseUrl);
+            diagnostic.responseHost = parsedUrl.hostname;
+            diagnostic.responsePath = parsedUrl.pathname;
+          } catch (error) {
+            diagnostic.responseHost = '';
+            diagnostic.responsePath = '';
+          }
+
+          try {
+            diagnostic.title = await page.title();
+          } catch (error) {
+            diagnostic.title = '[タイトルを取得できません]';
+          }
+
+          try {
+            diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+              .replace(/\s+/g, ' ')
+              .replace(/https?:\/\/\S+/g, '[URL]')
+              .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[LONG_TOKEN]')
+              .slice(0, 200);
+          } catch (error) {
+            diagnostic.bodySnippet = '[本文を取得できません]';
+          }
+
+          console.warn(
+            'Yahoo検索HTTP 200で商品カード0件のページ診断:',
+            JSON.stringify(diagnostic)
+          );
+        }
 
 
         if (count > 0) {
