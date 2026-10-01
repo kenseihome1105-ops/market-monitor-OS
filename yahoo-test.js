@@ -6,7 +6,11 @@ const {
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
   mergeUniqueItemsById_,
-  runConditionsIndependently_
+  runConditionsIndependently_,
+  shouldAcceptYahoo404Search_,
+  isYahooSearchResultsPage_,
+  shouldOpenYahooSearchCircuit_,
+  areAllYahooSearchResultsGlobalFailures_
 } = require('./market-scan-cursor');
 
 const MARKET_INGEST_URL = process.env.MARKET_INGEST_URL;
@@ -16,6 +20,11 @@ const MARKET = 'ヤフオク';
 
 const MAX_SEARCH_ITEMS = 10;
 const MAX_TRACKED_ITEMS = 30;
+const MAX_CONSECUTIVE_GLOBAL_FAILURE_CONDITIONS = 3;
+
+// Yahoo検索結果ルート不一致または正規ルートでカード0件の場合の診断上限。
+const MAX_EMPTY_RESULT_DIAGNOSTICS_PER_RUN = 3;
+let emptyResultDiagnosticsLogged = 0;
 
 
 // ============================================================
@@ -489,6 +498,7 @@ async function scanYahooSearchImpl_(
 
   let cardFound = false;
   let everyAttemptWasSuccessfulEmptyPage = true;
+  let everyFailedAttemptWasGlobal = true;
 
 
   for (
@@ -536,12 +546,87 @@ async function scanYahooSearchImpl_(
         status || 'NO_RESPONSE'
       );
 
-      if (
+      if (status === 404) {
+
+        everyFailedAttemptWasGlobal = false;
+
+        // Yahoo may return HTTP 404 with a valid results page. Only recover
+        // when the official results route and product cards are verified.
+        // A cardless 404 remains a failure, so the scan cursor is not advanced.
+        everyAttemptWasSuccessfulEmptyPage = false;
+
+        const count = await page.locator('li.Product').count();
+        let responseUrl = '';
+        let title = '';
+
+        try {
+          responseUrl = response && typeof response.url === 'function'
+            ? response.url()
+            : '';
+        } catch (error) {
+          responseUrl = '';
+        }
+
+        try {
+          title = await page.title();
+        } catch (error) {
+          title = '';
+        }
+
+        const acceptedAsSearchResults = shouldAcceptYahoo404Search_(
+          status,
+          responseUrl,
+          title,
+          count
+        );
+
+        if (acceptedAsSearchResults) {
+          console.warn(
+            'Yahoo検索HTTP 404だが正規検索ページに商品カードあり。取得を続行します:',
+            JSON.stringify({ conditionId, productCardCount: count })
+          );
+          cardFound = true;
+          break;
+        }
+
+        if (attempt === 3) {
+          const diagnostic = {
+            status,
+            productCardCount: count
+          };
+
+          try {
+            diagnostic.responsePath = new URL(responseUrl).pathname;
+          } catch (error) {
+            diagnostic.responsePath = '';
+          }
+
+          diagnostic.title = title;
+
+          try {
+            diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+              .replace(/\s+/g, ' ')
+              .replace(/https?:\/\/\S+/g, '[URL]')
+              .slice(0, 240);
+          } catch (error) {
+            diagnostic.bodySnippet = '[本文を取得できません]';
+          }
+
+          console.warn(
+            'Yahoo検索HTTPエラー詳細:',
+            JSON.stringify(diagnostic)
+          );
+        }
+
+      } else if (
         status < 200 ||
         status >= 400
       ) {
 
         everyAttemptWasSuccessfulEmptyPage = false;
+        if (!(status === 429 || status >= 500)) {
+          everyFailedAttemptWasGlobal = false;
+        }
 
         // 最終のHTTPエラー応答だけ、404の原因確認用に安全な範囲で記録する。
         // 検索語を含むクエリ文字列はログへ出さず、再試行・カーソル処理も変更しない。
@@ -579,29 +664,131 @@ async function scanYahooSearchImpl_(
 
       } else {
 
-        await page.waitForTimeout(
-          3000
+        let responseUrl = '';
+        let title = '';
+
+        try {
+          responseUrl = response && typeof response.url === 'function'
+            ? response.url()
+            : '';
+        } catch (error) {
+          responseUrl = '';
+        }
+
+        try {
+          title = await page.title();
+        } catch (error) {
+          title = '';
+        }
+
+        const expectedResultsPage = isYahooSearchResultsPage_(
+          responseUrl,
+          title
         );
 
+        if (!expectedResultsPage) {
+          everyAttemptWasSuccessfulEmptyPage = false;
 
-        const count =
-          await page.locator(
-            'li.Product'
-          ).count();
+          // 200 OKで一般ページへ移動した応答は空検索結果にせず、
+          // 上流の検索ルート異常として扱い、保存カーソルを維持する。
+          if (
+            attempt === 3 &&
+            emptyResultDiagnosticsLogged < MAX_EMPTY_RESULT_DIAGNOSTICS_PER_RUN
+          ) {
+            emptyResultDiagnosticsLogged++;
 
+            const diagnostic = {
+              conditionId,
+              status,
+              responseHost: '',
+              responsePath: '',
+              productCardCount: null,
+              title,
+              bodySnippet: '',
+              reason: 'UNEXPECTED_SEARCH_ROUTE'
+            };
 
-        console.log(
-          '商品カード数:',
-          count
-        );
+            try {
+              const parsedUrl = new URL(responseUrl);
+              diagnostic.responseHost = parsedUrl.hostname;
+              diagnostic.responsePath = parsedUrl.pathname;
+            } catch (error) {
+              diagnostic.responseHost = '';
+              diagnostic.responsePath = '';
+            }
 
+            try {
+              diagnostic.productCardCount =
+                await page.locator('li.Product').count();
+            } catch (error) {
+              diagnostic.productCardCount = null;
+            }
 
-        if (count > 0) {
+            try {
+              diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+                .replace(/\s+/g, ' ')
+                .replace(/https?:\/\/\S+/g, '[URL]')
+                .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[LONG_TOKEN]')
+                .slice(0, 200);
+            } catch (error) {
+              diagnostic.bodySnippet = '[本文を取得できません]';
+            }
 
-          cardFound = true;
+            console.warn(
+              'Yahoo検索HTTP 200で正規検索結果ルート以外へ移動:',
+              JSON.stringify(diagnostic)
+            );
+          }
+        } else {
+          everyFailedAttemptWasGlobal = false;
 
-          break;
+          await page.waitForTimeout(3000);
 
+          const count = await page.locator('li.Product').count();
+
+          console.log(
+            '商品カード数:',
+            count
+          );
+
+          if (
+            count === 0 &&
+            attempt === 3 &&
+            emptyResultDiagnosticsLogged < MAX_EMPTY_RESULT_DIAGNOSTICS_PER_RUN
+          ) {
+            emptyResultDiagnosticsLogged++;
+
+            const diagnostic = {
+              conditionId,
+              status,
+              responseHost: 'auctions.yahoo.co.jp',
+              responsePath: '/search/search',
+              productCardCount: 0,
+              title,
+              bodySnippet: '',
+              reason: 'VALID_SEARCH_ROUTE_NO_CARDS'
+            };
+
+            try {
+              diagnostic.bodySnippet = (await page.locator('body').innerText({ timeout: 2000 }))
+                .replace(/\s+/g, ' ')
+                .replace(/https?:\/\/\S+/g, '[URL]')
+                .replace(/\b[A-Za-z0-9_-]{32,}\b/g, '[LONG_TOKEN]')
+                .slice(0, 200);
+            } catch (error) {
+              diagnostic.bodySnippet = '[本文を取得できません]';
+            }
+
+            console.warn(
+              'Yahoo検索HTTP 200で正規検索結果ルートの商品カード0件:',
+              JSON.stringify(diagnostic)
+            );
+          }
+
+          if (count > 0) {
+            cardFound = true;
+            break;
+          }
         }
 
       }
@@ -610,6 +797,7 @@ async function scanYahooSearchImpl_(
     } catch (error) {
 
       everyAttemptWasSuccessfulEmptyPage = false;
+      everyFailedAttemptWasGlobal = false;
 
       console.log(
         '検索試行失敗:',
@@ -641,6 +829,8 @@ async function scanYahooSearchImpl_(
       failureReason: everyAttemptWasSuccessfulEmptyPage
         ? 'NO_PRODUCT_CARDS'
         : 'SEARCH_RETRY_FAILED',
+      globalUpstreamFailure:
+        everyFailedAttemptWasGlobal && !everyAttemptWasSuccessfulEmptyPage,
       items: [],
       rawRowsRead: 0,
       rawItemIds: [],
@@ -2114,6 +2304,8 @@ async function main() {
 
     const trackedYahooMap =
       new Map();
+    let consecutiveGlobalFailureConditions = 0;
+    let yahooSearchCircuitOpen = false;
 
 
     const conditionFailures = await runConditionsIndependently_(
@@ -2139,19 +2331,31 @@ async function main() {
 
 
       // 毎回先頭10行も確認し、新着・終了間近の出品を拾う。
-      const headResult =
-        await scanYahooSearch(
-          searchPage,
-          config,
-          defaultScanOffset_(MARKET)
-        );
+      const circuitWasOpenAtConditionStart = yahooSearchCircuitOpen;
+      const headResult = circuitWasOpenAtConditionStart
+        ? {
+            ok: false,
+            failureReason: 'GLOBAL_OUTAGE_CIRCUIT_OPEN',
+            skippedByCircuit: true,
+            items: [],
+            rawRowsRead: 0,
+            rawItemIds: [],
+            lastRawItemId: ''
+          }
+        : await scanYahooSearch(
+            searchPage,
+            config,
+            defaultScanOffset_(MARKET)
+          );
 
       let scanOffset = storedScanOffset;
-      let cursorMode = 'HEAD';
+      let cursorMode = circuitWasOpenAtConditionStart
+        ? 'GLOBAL_OUTAGE_CIRCUIT_OPEN'
+        : 'HEAD';
       let coverageResult = headResult;
       let lookbackResult = null;
 
-      if (storedScanOffset > defaultScanOffset_(MARKET)) {
+      if (!circuitWasOpenAtConditionStart && storedScanOffset > defaultScanOffset_(MARKET)) {
         if (storedLastItemId) {
           const lookbackOffset = Math.max(
             defaultScanOffset_(MARKET),
@@ -2205,6 +2409,36 @@ async function main() {
           'Yahoo継続位置に商品カードがありません。結果終端としてカーソルを先頭へ戻します:',
           config.conditionId
         );
+      }
+
+      if (!circuitWasOpenAtConditionStart) {
+        const conditionSearchResults = Array.from(new Set([
+          headResult,
+          lookbackResult,
+          coverageResult
+        ].filter(Boolean)));
+        const conditionHadOnlyGlobalFailures =
+          areAllYahooSearchResultsGlobalFailures_(conditionSearchResults);
+
+        if (conditionHadOnlyGlobalFailures) {
+          consecutiveGlobalFailureConditions++;
+          console.warn(
+            'Yahoo全体障害を検出した条件数:',
+            consecutiveGlobalFailureConditions
+          );
+
+          if (shouldOpenYahooSearchCircuit_(
+            consecutiveGlobalFailureConditions,
+            MAX_CONSECUTIVE_GLOBAL_FAILURE_CONDITIONS
+          )) {
+            yahooSearchCircuitOpen = true;
+            console.warn(
+              'Yahoo検索回路をOPEN。後続条件は検索を省略し、カーソルを維持します。既存商品の追跡は続行します。'
+            );
+          }
+        } else {
+          consecutiveGlobalFailureConditions = 0;
+        }
       }
 
       console.log(
@@ -2349,7 +2583,13 @@ async function main() {
       );
 
       const failedStages = [];
-      if (!headResult.ok) failedStages.push('先頭');
+      if (!headResult.ok) {
+        failedStages.push(
+          circuitWasOpenAtConditionStart
+            ? '全体障害回路で検索をスキップ'
+            : '先頭'
+        );
+      }
       if (lookbackResult && !lookbackResult.ok) {
         failedStages.push('カーソル再確認');
       }
@@ -2388,6 +2628,11 @@ async function main() {
     // 複数条件から返ったtrackedYahooを重複排除したうえで、
     // 既存の安全な詳細価格取得ロジックへ渡す。
     // ========================================================
+
+    console.log(
+      'Yahoo検索回路:',
+      yahooSearchCircuitOpen ? 'OPEN（後続検索はカーソル維持で省略）' : 'CLOSED'
+    );
 
     const trackedYahoo =
       Array.from(
