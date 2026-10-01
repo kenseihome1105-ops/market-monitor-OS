@@ -6,6 +6,10 @@ const {
   mergeUniqueItemsById_
 } = require('./market-scan-cursor');
 const { shouldRetryAppsScriptResult_ } = require('./apps-script-retry');
+const {
+  buildMarketCompsCacheKey_,
+  getOrLoadMarketComps_
+} = require('./market-comps-cache');
 
 
 // ============================================================
@@ -179,9 +183,7 @@ async function postAppsScriptJson(
   payload,
   label
 ) {
-
   const startedAt = Date.now();
-
   try {
     return await postAppsScriptJsonWithRetry_(payload, label);
   } finally {
@@ -191,7 +193,6 @@ async function postAppsScriptJson(
     );
   }
 }
-
 
 async function postAppsScriptJsonWithRetry_(
   payload,
@@ -2629,7 +2630,8 @@ function buildMarketCompsCategoryId_(
 async function runYahooMarketCompsForTarget_(
   page,
   insertedItem,
-  config
+  config,
+  marketCompsCache
 ) {
 
   const target =
@@ -2752,148 +2754,104 @@ async function runYahooMarketCompsForTarget_(
   );
 
 
-  const response =
-    await page.goto(
-      searchUrl,
-      {
-
-        waitUntil:
-          'domcontentloaded',
-
-        timeout:
-          MARKET_COMPS_TIMEOUT_MS
-
-      }
-    );
-
-
-  if (
-    !response
-  ) {
-
-    throw new Error(
-      'Yahoo Market Comps: HTTPレスポンスを取得できませんでした'
-    );
-
-  }
-
-
-  console.log(
-    'Yahoo Market Comps HTTP:',
-    response.status()
+  const cacheKey = buildMarketCompsCacheKey_(
+    target.dbItemId,
+    searchUrl
   );
+  const cacheResult = await getOrLoadMarketComps_(
+    marketCompsCache,
+    cacheKey,
+    async () => {
+      const response = await page.goto(
+        searchUrl,
+        {
+          waitUntil: 'domcontentloaded',
+          timeout: MARKET_COMPS_TIMEOUT_MS
+        }
+      );
 
+      if (!response) {
+        throw new Error(
+          'Yahoo Market Comps: HTTPレスポンスを取得できませんでした'
+        );
+      }
 
-  if (
-    response.status() < 200 ||
-    response.status() >= 400
-  ) {
+      console.log(
+        'Yahoo Market Comps HTTP:',
+        response.status()
+      );
 
-    throw new Error(
-      `Yahoo Market Comps HTTP Error: ${response.status()}`
-    );
+      if (
+        response.status() < 200 ||
+        response.status() >= 400
+      ) {
+        throw new Error(
+          `Yahoo Market Comps HTTP Error: ${response.status()}`
+        );
+      }
 
-  }
+      await page.waitForSelector(
+        'body',
+        { timeout: MARKET_COMPS_TIMEOUT_MS }
+      );
 
+      await page.waitForTimeout(2500);
 
-  await page.waitForSelector(
-    'body',
-    {
-      timeout:
-        MARKET_COMPS_TIMEOUT_MS
+      const pageText = normalizeMarketCompsSpace_(
+        await page.locator('body').innerText()
+      );
+
+      if (
+        !pageText.includes('落札') ||
+        (
+          !pageText.includes('終了180日間') &&
+          !pageText.includes('180日間の落札相場')
+        )
+      ) {
+        throw new Error(
+          'Yahoo落札相場ページとして確認できませんでした。安全停止します。'
+        );
+      }
+
+      const summary = await extractYahooMarketCompsSummary_(page);
+      const rawItems = await extractYahooClosedItems_(
+        page,
+        MARKET_COMPS_MAX_ITEMS
+      );
+
+      if (rawItems.length === 0) {
+        throw new Error(
+          '落札済み商品の取得件数が0件でした。DOM変更の可能性があるため安全停止します。'
+        );
+      }
+
+      const comparisons = normalizeYahooClosedItems_(
+        rawItems,
+        query,
+        categoryId
+      );
+
+      if (comparisons.length === 0) {
+        throw new Error(
+          '正規化後の比較商品が0件です。安全停止します。'
+        );
+      }
+
+      return { summary, comparisons };
     }
   );
 
-
-  await page.waitForTimeout(
-    2500
-  );
-
-
-  const pageText =
-    normalizeMarketCompsSpace_(
-      await page
-        .locator(
-          'body'
-        )
-        .innerText()
-    );
-
-
-  if (
-    !pageText.includes(
-      '落札'
-    )
-    ||
-    (
-      !pageText.includes(
-        '終了180日間'
-      )
-      &&
-      !pageText.includes(
-        '180日間の落札相場'
-      )
-    )
-  ) {
-
-    throw new Error(
-      'Yahoo落札相場ページとして確認できませんでした。安全停止します。'
-    );
-
-  }
-
-
-  const summary =
-    await extractYahooMarketCompsSummary_(
-      page
-    );
-
+  const summary = cacheResult.value.summary;
+  const comparisons = cacheResult.value.comparisons;
 
   console.log(
-    'Yahooページ集計:',
-    JSON.stringify(
-      summary
-    )
+    `Yahoo Market Comps cache: ${cacheResult.cacheHit ? 'HIT' : 'MISS'}`,
+    target.dbItemId
   );
-
-
-  const rawItems =
-    await extractYahooClosedItems_(
-      page,
-      MARKET_COMPS_MAX_ITEMS
-    );
-
-
-  if (
-    rawItems.length === 0
-  ) {
-
-    throw new Error(
-      '落札済み商品の取得件数が0件でした。DOM変更の可能性があるため安全停止します。'
-    );
-
-  }
-
-
-  const comparisons =
-    normalizeYahooClosedItems_(
-      rawItems,
-      query,
-      categoryId
-    );
-
-
-  if (
-    comparisons.length === 0
-  ) {
-
-    throw new Error(
-      '正規化後の比較商品が0件です。安全停止します。'
-    );
-
-  }
-
-
+  console.log(
+    'Yahooページ集計:',
+    JSON.stringify(summary)
+  );
   console.log(
     'Yahoo比較商品:',
     comparisons.length,
@@ -2965,7 +2923,8 @@ async function runYahooMarketCompsForTarget_(
 async function runYahooMarketCompsForInsertedItems_(
   page,
   insertedItems,
-  config
+  config,
+  marketCompsCache
 ) {
 
   if (
@@ -3034,7 +2993,8 @@ async function runYahooMarketCompsForInsertedItems_(
       await runYahooMarketCompsForTarget_(
         page,
         insertedItem,
-        config
+        config,
+        marketCompsCache
       );
 
 
@@ -3098,7 +3058,8 @@ async function runYahooMarketCompsForInsertedItems_(
 
 async function scanMercariCondition(
   page,
-  config
+  config,
+  marketCompsCache
 ) {
 
   console.log(
@@ -3333,7 +3294,8 @@ async function scanMercariCondition(
   const marketCompsResult = await runYahooMarketCompsForInsertedItems_(
     page,
     insertedItems,
-    config
+    config,
+    marketCompsCache
   );
   console.log(
     '[TIMING] Market Comps batch:',
@@ -3483,6 +3445,8 @@ async function main() {
   const page =
     await context.newPage();
 
+  const marketCompsCache = new Map();
+
 
   try {
 
@@ -3527,7 +3491,8 @@ async function main() {
 
         await scanMercariCondition(
           page,
-          config
+          config,
+          marketCompsCache
         );
 
 
