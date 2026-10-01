@@ -13,7 +13,11 @@ const {
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
   nextYahooScanOffset_,
-  buildYahooScanUrl_
+  buildYahooScanUrl_,
+  shouldAcceptYahoo404Search_,
+  isYahooSearchResultsPage_,
+  shouldOpenYahooSearchCircuit_,
+  areAllYahooSearchResultsGlobalFailures_
 } = require('./market-scan-cursor');
 
 function listings(count) {
@@ -269,4 +273,109 @@ test('Yahoo pagination changes only its one-based start and page size', () => {
 test('invalid offsets and non-Yahoo URLs fail closed', () => {
   assert.throws(() => selectOffsetBatch_(listings(1), -1), /offset/);
   assert.throws(() => buildYahooScanUrl_('https://example.com/search', 1), /Yahoo/);
+});
+
+
+test('Yahoo 404 search responses are accepted only with verified product cards', () => {
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      '【2026年最新】Yahoo!オークション -Kiton スーツの中古品一覧',
+      3
+    ),
+    true
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      '【2026年最新】Yahoo!オークション -Kiton スーツの中古品一覧',
+      0
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      404,
+      'https://example.com/search/search?p=Kiton',
+      'Yahoo!オークション -Kiton',
+      3
+    ),
+    false
+  );
+
+  assert.equal(
+    shouldAcceptYahoo404Search_(
+      503,
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      'Yahoo!オークション -Kiton',
+      3
+    ),
+    false
+  );
+});
+
+
+test('Yahoo 200 pages are accepted only on the official search results route', () => {
+  assert.equal(
+    isYahooSearchResultsPage_(
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      '【2026年最新】Yahoo!オークション -Kiton スーツの中古品一覧'
+    ),
+    true
+  );
+
+  assert.equal(
+    isYahooSearchResultsPage_(
+      'https://auctions.yahoo.co.jp/opensearch?p=Kiton',
+      'Yahoo!オークション'
+    ),
+    false
+  );
+
+  assert.equal(
+    isYahooSearchResultsPage_(
+      'https://example.com/search/search?p=Kiton',
+      'Yahoo!オークション -Kiton'
+    ),
+    false
+  );
+
+  assert.equal(
+    isYahooSearchResultsPage_(
+      'https://auctions.yahoo.co.jp/search/search?p=Kiton',
+      'Yahoo! JAPAN'
+    ),
+    false
+  );
+});
+
+test('Yahoo outage circuit opens only at the configured consecutive failure threshold', () => {
+  assert.equal(shouldOpenYahooSearchCircuit_(1, 3), false);
+  assert.equal(shouldOpenYahooSearchCircuit_(2, 3), false);
+  assert.equal(shouldOpenYahooSearchCircuit_(3, 3), true);
+  assert.equal(shouldOpenYahooSearchCircuit_(5, 3), true);
+  assert.equal(shouldOpenYahooSearchCircuit_(3, 0), false);
+});
+
+test('Yahoo circuit breaker requires every page in a condition to show a global failure', () => {
+  assert.equal(
+    areAllYahooSearchResultsGlobalFailures_([
+      { globalUpstreamFailure: true },
+      { globalUpstreamFailure: true }
+    ]),
+    true
+  );
+  assert.equal(
+    areAllYahooSearchResultsGlobalFailures_([
+      { globalUpstreamFailure: true },
+      { ok: true }
+    ]),
+    false
+  );
+  assert.equal(areAllYahooSearchResultsGlobalFailures_([]), false);
+  assert.equal(areAllYahooSearchResultsGlobalFailures_(null), false);
 });
