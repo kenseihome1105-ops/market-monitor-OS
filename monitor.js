@@ -1,6 +1,7 @@
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
+  enforceMercariActiveSearchUrl_,
   CURSOR_LOOKAHEAD_ITEMS,
   selectCursorBatch_,
   mergeUniqueItemsById_
@@ -3078,9 +3079,17 @@ async function scanMercariCondition(
     'Mercari検索ページを開きます'
   );
 
+  // シートURLのstatus設定に依存せず、仕入れ監視は販売中に固定する。
+  const activeSearchUrl =
+    enforceMercariActiveSearchUrl_(config.searchUrl);
+
+  console.log(
+    'Mercari販売中フィルター: status=on_sale'
+  );
+
 
   await page.goto(
-    config.searchUrl,
+    activeSearchUrl,
     {
 
       waitUntil:

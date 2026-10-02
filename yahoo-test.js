@@ -514,26 +514,15 @@ async function scanYahooSearchImpl_(
       );
 
 
-      let response = null;
-
-      if (attempt === 1) {
-
-        response = await page.goto(
-          pagedSearchUrl,
-          {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
-          }
-        );
-
-      } else {
-
-        response = await page.reload({
+      // 毎回元の検索URLへ戻す。直前にYahooが /opensearch などへ
+      // 転送した場合、その誤った遷移先を page.reload() し続けない。
+      const response = await page.goto(
+        pagedSearchUrl,
+        {
           waitUntil: 'domcontentloaded',
           timeout: 60000
-        });
-
-      }
+        }
+      );
 
 
       const status =

@@ -7,6 +7,37 @@ function defaultScanOffset_(market) {
   return String(market || '').trim() === 'ヤフオク' ? 1 : 0;
 }
 
+/**
+ * Force Mercari sourcing searches to active listings while preserving the
+ * configured keyword, brand, category, sort, and other search parameters.
+ */
+function enforceMercariActiveSearchUrl_(searchUrl) {
+  let url;
+  try {
+    url = new URL(String(searchUrl || '').trim());
+  } catch (error) {
+    throw new Error('Mercari検索URLが不正です');
+  }
+
+  if (
+    url.protocol !== 'https:' ||
+    url.hostname !== 'jp.mercari.com' ||
+    url.port ||
+    url.username ||
+    url.password ||
+    !['/search', '/search/'].includes(url.pathname)
+  ) {
+    throw new Error('Mercari検索URLではありません');
+  }
+
+  url.searchParams.set('status', 'on_sale');
+  if (url.searchParams.get('status') !== 'on_sale') {
+    throw new Error('Mercari検索URLの販売中指定に失敗しました');
+  }
+
+  return url.toString();
+}
+
 function selectOffsetBatch_(items, offset, limit = MAX_SCAN_ITEMS) {
   if (!Array.isArray(items)) {
     throw new TypeError('items must be an array');
@@ -313,6 +344,7 @@ module.exports = {
   MAX_SCAN_ITEMS,
   CURSOR_LOOKAHEAD_ITEMS,
   defaultScanOffset_,
+  enforceMercariActiveSearchUrl_,
   selectOffsetBatch_,
   selectCursorBatch_,
   mergeUniqueItemsById_,
