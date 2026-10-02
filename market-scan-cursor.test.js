@@ -6,6 +6,7 @@ const {
   MAX_SCAN_ITEMS,
   CURSOR_LOOKAHEAD_ITEMS,
   defaultScanOffset_,
+  enforceMercariActiveSearchUrl_,
   selectOffsetBatch_,
   selectCursorBatch_,
   mergeUniqueItemsById_,
@@ -268,6 +269,38 @@ test('Yahoo pagination changes only its one-based start and page size', () => {
   assert.equal(parsed.searchParams.get('o1'), 'a');
   assert.equal(parsed.searchParams.get('b'), '31');
   assert.equal(parsed.searchParams.get('n'), '10');
+});
+
+
+test('Mercari sourcing URL always forces status=on_sale and preserves other filters', () => {
+  const url = new URL(enforceMercariActiveSearchUrl_(
+    'https://jp.mercari.com/search?keyword=GUCCI&status=sold_out&status=any&sort=created_time&order=desc'
+  ));
+
+  assert.equal(url.searchParams.get('keyword'), 'GUCCI');
+  assert.equal(url.searchParams.get('sort'), 'created_time');
+  assert.equal(url.searchParams.get('order'), 'desc');
+  assert.deepEqual(url.searchParams.getAll('status'), ['on_sale']);
+});
+
+test('Mercari sourcing URL adds status=on_sale when it is missing', () => {
+  const url = new URL(enforceMercariActiveSearchUrl_(
+    'https://jp.mercari.com/search?keyword=PRADA'
+  ));
+
+  assert.equal(url.searchParams.get('status'), 'on_sale');
+  assert.equal(url.searchParams.get('keyword'), 'PRADA');
+});
+
+test('Mercari sourcing URL rejects a non-Mercari search endpoint', () => {
+  assert.throws(
+    () => enforceMercariActiveSearchUrl_('https://jp.mercari.com/item/m123'),
+    /Mercari/
+  );
+  assert.throws(
+    () => enforceMercariActiveSearchUrl_('https://example.com/search?status=on_sale'),
+    /Mercari/
+  );
 });
 
 test('invalid offsets and non-Yahoo URLs fail closed', () => {
