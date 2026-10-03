@@ -67,4 +67,16 @@ function prioritizeYahooTargets_(items, now = Date.now()) {
   });
 }
 
-module.exports = { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_ };
+async function runYahooDiscoveryCondition_(scan, options = {}) {
+  const reason = options.fastMode && (options.circuitOpen
+    ? 'GLOBAL_OUTAGE_CIRCUIT_OPEN' : options.budgetExpired ? 'DISCOVERY_BUDGET_EXHAUSTED' : '');
+  if (reason) {
+    if (options.onDeferred) options.onDeferred(reason);
+    // No attempt acknowledgement or empty ingest: retain this condition's saved state.
+    return { ok: true, deferred: true, reason };
+  }
+  if (options.fastMode && options.acknowledge) await options.acknowledge();
+  return scan();
+}
+
+module.exports = { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ };

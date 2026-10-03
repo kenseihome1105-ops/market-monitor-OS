@@ -1,8 +1,8 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_ } = require('./monitor-priority');
-const { enforceMercariActiveSearchUrl_, buildYahooScanUrl_ } = require('./market-scan-cursor');
+const { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
+const { enforceMercariActiveSearchUrl_, buildYahooScanUrl_, runConditionsIndependently_ } = require('./market-scan-cursor');
 const { processDeadlineBatch_ } = require('./yahoo-deadline-worker');
 const ids = (prefix, n) => Array.from({ length: n }, (_, i) => prefix + (i + 1));
 
@@ -104,4 +104,44 @@ test('an unreadable or expired deadline is never notified as a fresh auction', a
   const result = await processDeadlineBatch_([{itemId:'a',conditionId:'Y'}], async () => ({itemId:'a',price:1,endTime:''}),
     async () => { throw new Error('Must not ingest invalid detail'); }, async () => { throw new Error('Must not notify'); });
   assert.equal(result.updated, 0);
+});
+
+test('a global Yahoo outage defers later fast conditions without empty ingests or cursor/attempt writes', async () => {
+  const configs=ids('Y-',80).map((conditionId,i)=>({conditionId,scanOffset:i*10+1,lastItemId:'anchor-'+i}));
+  const saved=structuredClone(configs);
+  let searches=0,ingests=0,attemptWrites=0,deferred=0,circuitOpen=false;
+  const failures=await runConditionsIndependently_(configs,config=>runYahooDiscoveryCondition_(async()=>{
+    searches++;
+    if(searches<=3) {
+      if(searches===3)circuitOpen=true;
+      throw new Error('Yahoo search HTTP 500');
+    }
+    ingests++;
+    config.scanOffset+=10;
+    return {ok:true};
+  },{fastMode:true,circuitOpen,acknowledge:async()=>{attemptWrites++;},onDeferred:()=>{deferred++;}}),()=>{});
+  assert.equal(searches,3);assert.equal(ingests,0);assert.equal(attemptWrites,3);
+  assert.equal(failures.length,3);assert.equal(deferred,77);
+  assert.deepEqual(configs,saved);
+});
+
+test('deferred budgets preserve state; normal fast work acknowledges before scanning', async () => {
+  const events=[];
+  const options={fastMode:true,acknowledge:async()=>events.push('ack'),onDeferred:reason=>events.push(reason)};
+  const deferred=await runYahooDiscoveryCondition_(async()=>events.push('scan'),{...options,budgetExpired:true});
+  assert.equal(deferred.deferred,true);
+  assert.deepEqual(events,['DISCOVERY_BUDGET_EXHAUSTED']);
+  events.length=0;
+  await runYahooDiscoveryCondition_(async()=>{events.push('scan');return {ok:true};},options);
+  assert.deepEqual(events,['ack','scan']);
+  events.length=0;
+  await assert.rejects(runYahooDiscoveryCondition_(async()=>events.push('scan'),{...options,acknowledge:async()=>{throw new Error('busy');}}),/busy/);
+  assert.deepEqual(events,[]);
+});
+
+test('legacy Yahoo mode retains inline tracking even when search circuit is open', async () => {
+  let legacyCalls=0;
+  const result=await runYahooDiscoveryCondition_(async()=>{legacyCalls++;return {ok:false,error:'search unavailable; legacy detail tracking ran'};},
+    {fastMode:false,circuitOpen:true,budgetExpired:true,acknowledge:async()=>{throw new Error('legacy must not ack fast attempt');}});
+  assert.equal(legacyCalls,1);assert.equal(result.ok,false);
 });

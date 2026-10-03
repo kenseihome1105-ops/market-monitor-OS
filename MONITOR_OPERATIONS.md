@@ -18,6 +18,8 @@ Mercari and Yahoo discovery each use four stable condition shards, at most two s
 
 Discovery budgets stop starting new conditions after 16 minutes. Conditions are ordered by oldest attempt and resume from their saved state on the next run. A failed condition is recorded before scanning so it cannot repeatedly consume all time ahead of other conditions. Work left over is logged explicitly.
 
+When repeated global Yahoo search failures open the circuit, fast discovery defers later conditions without sending empty ingest requests or changing their saved cursors/attempts. The next run starts with the circuit closed and can retry. Actual search failures remain failures in the run summary. The separate deadline worker can continue detail checks for known auctions when those pages remain available. An upstream search outage prevents discovery of new auctions until the search recovers; this change cannot remove that limitation.
+
 Each worker type has its own concurrency group. Discovery, valuation and deadline monitoring keep the active run and only the newest pending tick. Superseded timer ticks are coalesced; saved listing work stays in Apps Script. The two historical backfill workflows share a separate group. They retain their existing queued batch behavior and no longer wait behind sourcing crawls.
 
 ## Deadline safety and delivery

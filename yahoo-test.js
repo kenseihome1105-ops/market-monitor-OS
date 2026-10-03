@@ -1,4 +1,4 @@
-const { selectConditionShard_, prioritizeYahooTargets_ } = require('./monitor-priority');
+const { selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
@@ -2310,12 +2310,7 @@ async function main() {
 
     const conditionFailures = await runConditionsIndependently_(
       configs,
-      async (config, i) => {
-      if (FAST_MODE && Date.now() - budgetStartedAt > 16 * 60000) {
-        deferredConditions++;
-        return { ok: true, deferred: true };
-      }
-      if (FAST_MODE) await postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt');
+      async (config, i) => runYahooDiscoveryCondition_(async () => {
 
 
       console.log(
@@ -2614,7 +2609,16 @@ async function main() {
       }
 
       return { ok: true };
-      },
+      }, {
+        fastMode: FAST_MODE,
+        circuitOpen: yahooSearchCircuitOpen,
+        budgetExpired: Date.now() - budgetStartedAt > 16 * 60000,
+        acknowledge: () => postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt'),
+        onDeferred: reason => {
+          deferredConditions++;
+          console.warn('YAHOO_CONDITION_DEFERRED:', JSON.stringify({ conditionId: config.conditionId, reason, cursorPreserved: true }));
+        }
+      }),
       failure => {
         console.error(
           '⚠️ 条件監視失敗。後続条件へ継続します:',
@@ -2660,7 +2664,7 @@ async function main() {
       context,
       prioritizeYahooTargets_(trackedYahoo)
     );
-    console.log('YAHOO_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, failed: conditionFailures.length, deferred: deferredConditions }));
+    console.log('YAHOO_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, failed: conditionFailures.length, deferred: deferredConditions, searchCircuitOpen: yahooSearchCircuitOpen, deadlineTracking: FAST_MODE ? 'SEPARATE_WORKER' : 'INLINE' }));
 
     if (conditionFailures.length > 0) {
       console.error(
@@ -2669,7 +2673,7 @@ async function main() {
       );
       throw new Error(
         `Yahoo監視条件${conditionFailures.length}件に失敗しました。` +
-        '後続条件の走査と既存商品の追跡は完了しています。'
+        (FAST_MODE ? '未走査条件は保存位置を維持。既存商品の終了間近追跡は別ワーカーです。' : '後続条件の走査と既存商品の追跡は完了しています。')
       );
     }
 
