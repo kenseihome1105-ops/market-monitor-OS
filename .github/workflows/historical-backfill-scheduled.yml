@@ -9,13 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-monitor-os-production
+  group: market-monitor-os-backfill
   queue: max
   cancel-in-progress: false
 
 jobs:
   historical-backfill:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -42,3 +43,4 @@ jobs:
           HISTORICAL_TARGET_DB_ITEM_ID: ""
           HISTORICAL_AUTO_CONTINUE: "false"
         run: node historical-backfill.js
+

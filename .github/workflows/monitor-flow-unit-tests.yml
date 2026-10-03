@@ -20,6 +20,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Install packages
+        run: npm install --no-audit --no-fund
       - name: Run unit tests
         run: npm test
       - name: Check JavaScript syntax
@@ -27,3 +29,5 @@ jobs:
           node --check monitor.js
           node --check yahoo-test.js
           node --check historical-backfill.js
+          node --check market-comps-worker.js
+          node --check yahoo-deadline-worker.js

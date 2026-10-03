@@ -9,7 +9,7 @@ function defaultScanOffset_(market) {
 
 /**
  * Force Mercari sourcing searches to active listings while preserving the
- * configured keyword, brand, category, sort, and other search parameters.
+ * configured keyword, brand, category, and other search parameters. Sort is newest first.
  */
 function enforceMercariActiveSearchUrl_(searchUrl) {
   let url;
@@ -31,6 +31,8 @@ function enforceMercariActiveSearchUrl_(searchUrl) {
   }
 
   url.searchParams.set('status', 'on_sale');
+  url.searchParams.set('sort', 'created_time');
+  url.searchParams.set('order', 'desc');
   if (url.searchParams.get('status') !== 'on_sale') {
     throw new Error('Mercari検索URLの販売中指定に失敗しました');
   }
@@ -270,6 +272,8 @@ function buildYahooScanUrl_(searchUrl, oneBasedOffset, pageSize = MAX_SCAN_ITEMS
     throw new RangeError(`Yahoo page size must be between 1 and ${MAX_SCAN_ITEMS}`);
   }
 
+  url.searchParams.set('s1', 'end');
+  url.searchParams.set('o1', 'a');
   url.searchParams.set('b', String(offset));
   url.searchParams.set('n', String(size));
   return url.toString();
@@ -358,3 +362,4 @@ module.exports = {
   shouldOpenYahooSearchCircuit_,
   areAllYahooSearchResultsGlobalFailures_
 };
+

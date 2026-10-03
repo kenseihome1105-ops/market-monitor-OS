@@ -1,3 +1,5 @@
+const { selectMercariHeadGap_, selectConditionShard_ } = require('./monitor-priority');
+const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
@@ -255,6 +257,7 @@ async function postAppsScriptJsonWithRetry_(
 
             method:
               'POST',
+            signal: AbortSignal.timeout(payload.action === 'runMarketValuation' ? 390000 : 90000),
 
             redirect:
               'follow',
@@ -331,7 +334,7 @@ async function postAppsScriptJsonWithRetry_(
 
     console.log(
       `[${label}] Final URL:`,
-      response.url
+      String(response.url || '').split('?')[0]
     );
 
 
@@ -1279,6 +1282,8 @@ async function sendToAppsScript(
       conditionId:
         conditionId,
 
+      includeMarketCompsTargets: !FAST_MODE,
+      includeTrackedYahoo: !FAST_MODE,
       items:
         items
 
@@ -1289,7 +1294,7 @@ async function sendToAppsScript(
 
 }
 
-async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId) {
+async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId, headState) {
   return postAppsScriptJson(
     {
       secret: INGEST_SECRET,
@@ -1297,7 +1302,8 @@ async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId)
       market: MARKET,
       conditionId,
       nextOffset,
-      lastItemId: String(lastItemId || '')
+      lastItemId: String(lastItemId || ''),
+      headState
     },
     `Scan cursor ${conditionId}`
   );
@@ -3116,9 +3122,10 @@ async function scanMercariCondition(
     ? Math.max(0, Number(config.scanOffset))
     : defaultScanOffset_(MARKET);
   const lastItemId = String(config.lastItemId || '').trim();
-  const targetCount = lastItemId
-    ? scanOffset + MAX_SEARCH_ITEMS + CURSOR_LOOKAHEAD_ITEMS
-    : MAX_SEARCH_ITEMS;
+  const targetCount = Math.max(
+    lastItemId ? scanOffset + MAX_SEARCH_ITEMS + CURSOR_LOOKAHEAD_ITEMS : MAX_SEARCH_ITEMS,
+    Number(config.headState && config.headState.offset || 0) + 2 * MAX_SEARCH_ITEMS
+  );
 
   const listingLoadStartedAt = Date.now();
   const listingLoadStats = await loadListings(
@@ -3155,14 +3162,15 @@ async function scanMercariCondition(
     MAX_SEARCH_ITEMS
   );
 
-  const headItems = rawItemIds
-    .slice(0, MAX_SEARCH_ITEMS)
+  const headGap = selectMercariHeadGap_(rawItemIds, config.headState || {}, listingLoadStats.reachedBottom);
+  const headItems = headGap.headIds
     .map(itemId => itemById.get(itemId))
     .filter(Boolean);
   const continuationItems = batch.items
     .map(itemId => itemById.get(itemId))
     .filter(Boolean);
-  const items = mergeUniqueItemsById_(headItems, continuationItems);
+  const gapItems = headGap.gapIds.map(id => itemById.get(id)).filter(Boolean);
+  const items = mergeUniqueItemsById_(headItems, gapItems, continuationItems);
 
 
   console.log(
@@ -3178,6 +3186,8 @@ async function scanMercariCondition(
       lastItemId: lastItemId || '',
       rawRowsAvailable: rawItemIds.length,
       headItems: headItems.length,
+      newGapItems: gapItems.length,
+      pendingHeadGap: headGap.state.snapshotIds.length > 0,
       continuationItems: continuationItems.length
     })
   );
@@ -3196,19 +3206,6 @@ async function scanMercariCondition(
 
   }
 
-
-  if (!rawItemIds.length && (scanOffset > 0 || lastItemId)) {
-    await acknowledgeMarketScanCursor_(
-      config.conditionId,
-      defaultScanOffset_(MARKET),
-      ''
-    );
-    console.log(
-      'Mercari末尾まで走査済み。次回は先頭から再走査します:',
-      config.conditionId
-    );
-    return { received: 0, inserted: 0, updated: 0, insertedItems: [] };
-  }
 
   if (!rawItemIds.length) {
 
@@ -3233,7 +3230,8 @@ async function scanMercariCondition(
       : batch.nextOffset,
     batch.items.length
       ? batch.items[batch.items.length - 1]
-      : ''
+      : '',
+    headGap.state
   );
 
 
@@ -3300,7 +3298,7 @@ async function scanMercariCondition(
   // ========================================================
 
   const marketCompsStartedAt = Date.now();
-  const marketCompsResult = await runYahooMarketCompsForInsertedItems_(
+  const marketCompsResult = FAST_MODE ? { attempted: 0, succeeded: 0, failed: 0 } : await runYahooMarketCompsForInsertedItems_(
     page,
     insertedItems,
     config,
@@ -3369,8 +3367,13 @@ async function main() {
   // 市場監視設定からMercariのON条件を取得
   // ========================================================
 
-  const configs =
-    await getMercariConfigs();
+  if (FAST_MODE) {
+    const capability = await postAppsScriptJson({ secret: INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
+    if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
+  }
+  const configs = selectConditionShard_(await getMercariConfigs());
+  const budgetStartedAt = Date.now();
+  let deferredConditions = 0;
 
 
   if (
@@ -3480,6 +3483,11 @@ async function main() {
       i++
     ) {
 
+      if (FAST_MODE && Date.now() - budgetStartedAt > 16 * 60000) {
+        deferredConditions = configs.length - i;
+        console.warn('MONITOR_BUDGET_DEFERRED:', deferredConditions, 'conditions; saved cursors preserved');
+        break;
+      }
       const config =
         configs[i];
 
@@ -3498,6 +3506,7 @@ async function main() {
 
       try {
 
+        if (FAST_MODE) await postAppsScriptJson({ secret: INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt');
         await scanMercariCondition(
           page,
           config,
@@ -3588,6 +3597,11 @@ async function main() {
     }
 
 
+    if (FAST_MODE && succeededConditions > 0) {
+      await postAppsScriptJson({ secret: INGEST_SECRET, action: 'runProcurementNotifications', markets: [MARKET] }, 'Procurement notifications');
+    }
+    if (FAST_MODE && failedConditions.length) throw new Error(`Mercari failed conditions: ${failedConditions.length}; cursors preserved`);
+    console.log('MONITOR_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, succeeded: succeededConditions, failed: failedConditions.length, deferred: deferredConditions }));
     if (
       succeededConditions === 0
       &&
@@ -3645,7 +3659,7 @@ async function main() {
 // 実行
 // ============================================================
 
-main()
+if (require.main === module) main()
   .catch(
     error => {
 
@@ -3665,3 +3679,6 @@ main()
 
     }
   );
+
+
+module.exports = { postAppsScriptJson, runYahooMarketCompsForTarget_, scanMercariCondition };

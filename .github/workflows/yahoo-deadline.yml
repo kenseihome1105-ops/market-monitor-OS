@@ -1,26 +1,21 @@
-name: Yahoo Test
+name: Yahoo Deadline Monitor
 
 on:
   schedule:
-    - cron: "2-52/10 * * * *"
+    - cron: "3-58/5 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: market-monitor-os-yahoo-discovery
+  group: market-monitor-os-yahoo-deadline
   cancel-in-progress: false
 
 jobs:
-  monitor:
+  worker:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        shard: [0, 1, 2, 3]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,11 +23,9 @@ jobs:
           node-version: '20'
       - run: npm install --no-audit --no-fund
       - run: npx playwright install --with-deps chromium
-      - name: Monitor condition shard (10-item lanes)
+      - name: Run bounded worker
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
           MONITOR_FAST_MODE: "true"
-          MONITOR_SHARD_COUNT: "4"
-          MONITOR_SHARD_INDEX: ${{ matrix.shard }}
-        run: node yahoo-test.js
+        run: node yahoo-deadline-worker.js
