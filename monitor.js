@@ -3518,44 +3518,62 @@ async function main() {
 
       } catch (error) {
 
-        const failure = {
+        const errorMessage =
+          error && error.message
+            ? error.message
+            : String(error);
 
-          conditionId:
-            config.conditionId ||
-            'UNKNOWN',
+        const cursorBusyDeferred =
+          errorMessage.includes('Scan cursor') &&
+          errorMessage.includes('"error":"busy"');
 
-          searchName:
-            config.searchName ||
-            '',
+        if (cursorBusyDeferred) {
+          deferredConditions++;
+          console.warn(
+            '⚠️ カーソル保存のみbusy。商品取込済みのため次回再走査へ:',
+            JSON.stringify({
+              conditionId: config.conditionId || 'UNKNOWN',
+              searchName: config.searchName || '',
+              error: errorMessage
+            })
+          );
+        } else {
+          const failure = {
 
-          error:
-            error &&
-            error.message
-              ? error.message
-              : String(error)
+            conditionId:
+              config.conditionId ||
+              'UNKNOWN',
 
-        };
+            searchName:
+              config.searchName ||
+              '',
+
+            error:
+              errorMessage
+
+          };
 
 
-        failedConditions.push(
-          failure
-        );
-
-
-        console.error(
-          '⚠️ 条件監視失敗。次の条件へ継続します:',
-          JSON.stringify(
+          failedConditions.push(
             failure
-          )
-        );
+          );
 
 
-        console.error(
-          error &&
-          error.stack
-            ? error.stack
-            : error
-        );
+          console.error(
+            '⚠️ 条件監視失敗。次の条件へ継続します:',
+            JSON.stringify(
+              failure
+            )
+          );
+
+
+          console.error(
+            error &&
+            error.stack
+              ? error.stack
+              : error
+          );
+        }
 
       }
 
