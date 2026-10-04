@@ -2348,6 +2348,27 @@ async function main() {
             defaultScanOffset_(MARKET)
           );
 
+      if (
+        !headResult.ok &&
+        headResult.failureReason === 'NO_PRODUCT_CARDS'
+      ) {
+        Object.assign(
+          headResult,
+          {
+            ok: true,
+            items: [],
+            rawRowsRead: 0,
+            rawItemIds: [],
+            lastRawItemId: '',
+            endOfResults: true
+          }
+        );
+        console.warn(
+          'Yahoo正規検索ページの商品0件を正常0件として扱います:',
+          config.conditionId
+        );
+      }
+
       let scanOffset = storedScanOffset;
       let cursorMode = circuitWasOpenAtConditionStart
         ? 'GLOBAL_OUTAGE_CIRCUIT_OPEN'
@@ -2664,15 +2685,47 @@ async function main() {
       context,
       prioritizeYahooTargets_(trackedYahoo)
     );
-    console.log('YAHOO_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, failed: conditionFailures.length, deferred: deferredConditions, searchCircuitOpen: yahooSearchCircuitOpen, deadlineTracking: FAST_MODE ? 'SEPARATE_WORKER' : 'INLINE' }));
 
-    if (conditionFailures.length > 0) {
+    const transientDeferredFailures = conditionFailures.filter(failure =>
+      failure &&
+      typeof failure.error === 'string' &&
+      (
+        failure.error.includes('"error":"busy"') ||
+        (
+          yahooSearchCircuitOpen &&
+          failure.error.startsWith('Yahoo検索に失敗:')
+        )
+      )
+    );
+    const fatalConditionFailures = conditionFailures.filter(
+      failure => !transientDeferredFailures.includes(failure)
+    );
+
+    deferredConditions += transientDeferredFailures.length;
+
+    if (transientDeferredFailures.length > 0) {
+      console.warn(
+        'Yahoo一時失敗を次回再走査へ繰越:',
+        JSON.stringify(transientDeferredFailures)
+      );
+    }
+
+    console.log('YAHOO_SHARD_SUMMARY:', JSON.stringify({
+      conditions: configs.length,
+      failed: fatalConditionFailures.length,
+      transientDeferred: transientDeferredFailures.length,
+      deferred: deferredConditions,
+      searchCircuitOpen: yahooSearchCircuitOpen,
+      deadlineTracking: FAST_MODE ? 'SEPARATE_WORKER' : 'INLINE'
+    }));
+
+    if (fatalConditionFailures.length > 0) {
       console.error(
         '失敗条件一覧:',
-        JSON.stringify(conditionFailures)
+        JSON.stringify(fatalConditionFailures)
       );
       throw new Error(
-        `Yahoo監視条件${conditionFailures.length}件に失敗しました。` +
+        `Yahoo監視条件${fatalConditionFailures.length}件に失敗しました。` +
         (FAST_MODE ? '未走査条件は保存位置を維持。既存商品の終了間近追跡は別ワーカーです。' : '後続条件の走査と既存商品の追跡は完了しています。')
       );
     }
