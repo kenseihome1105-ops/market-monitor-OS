@@ -3597,21 +3597,41 @@ async function main() {
     }
 
 
+    const preservedEmptyConditions = failedConditions.filter(
+      failure => failure && failure.error === 'Mercari feed is empty; preserve saved state'
+    );
+    const fatalFailedConditions = failedConditions.filter(
+      failure => !failure || failure.error !== 'Mercari feed is empty; preserve saved state'
+    );
+
+    if (preservedEmptyConditions.length > 0) {
+      console.warn(
+        'Mercari空結果(状態維持・非致命):',
+        preservedEmptyConditions.length
+      );
+    }
+
     if (FAST_MODE && succeededConditions > 0) {
       await postAppsScriptJson({ secret: INGEST_SECRET, action: 'runProcurementNotifications', markets: [MARKET] }, 'Procurement notifications');
     }
-    if (FAST_MODE && failedConditions.length) throw new Error(`Mercari failed conditions: ${failedConditions.length}; cursors preserved`);
-    console.log('MONITOR_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, succeeded: succeededConditions, failed: failedConditions.length, deferred: deferredConditions }));
+    if (FAST_MODE && fatalFailedConditions.length) throw new Error(`Mercari failed conditions: ${fatalFailedConditions.length}; cursors preserved`);
+    console.log('MONITOR_SHARD_SUMMARY:', JSON.stringify({
+      conditions: configs.length,
+      succeeded: succeededConditions,
+      failed: fatalFailedConditions.length,
+      preservedEmpty: preservedEmptyConditions.length,
+      deferred: deferredConditions
+    }));
     if (
       succeededConditions === 0
       &&
-      failedConditions.length > 0
+      fatalFailedConditions.length > 0
     ) {
 
       throw new Error(
         '全監視条件が失敗しました: ' +
         JSON.stringify(
-          failedConditions
+          fatalFailedConditions
         )
       );
 
