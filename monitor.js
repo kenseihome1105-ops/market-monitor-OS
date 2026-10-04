@@ -1,4 +1,9 @@
 const { selectMercariHeadGap_, selectConditionShard_ } = require('./monitor-priority');
+const {
+  createConditionAttemptBatch_,
+  recordConditionAttempt_,
+  buildConditionAttemptBatchPayload_
+} = require('./condition-attempt-batch');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
@@ -3476,6 +3481,11 @@ async function main() {
     const failedConditions =
       [];
 
+    // Record condition attempts locally and acknowledge them once per shard.
+    // This fairness signal must never block product scanning/persistence.
+    const conditionAttemptBatch =
+      createConditionAttemptBatch_();
+
 
     for (
       let i = 0;
@@ -3504,9 +3514,16 @@ async function main() {
       );
 
 
+      if (FAST_MODE) {
+        recordConditionAttempt_(
+          conditionAttemptBatch,
+          config.conditionId,
+          Date.now()
+        );
+      }
+
       try {
 
-        if (FAST_MODE) await postAppsScriptJson({ secret: INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt');
         await scanMercariCondition(
           page,
           config,
@@ -3582,6 +3599,47 @@ async function main() {
         800
       );
 
+    }
+
+
+    if (
+      FAST_MODE &&
+      conditionAttemptBatch.size > 0
+    ) {
+      const conditionAttemptBatchStartedAt = Date.now();
+      try {
+        const payload =
+          buildConditionAttemptBatchPayload_(
+            conditionAttemptBatch,
+            INGEST_SECRET
+          );
+
+        await postAppsScriptJson(
+          payload,
+          'Condition attempt batch'
+        );
+
+        console.log(
+          '[TIMING] Condition attempt batch:',
+          JSON.stringify({
+            count: payload.attempts.length,
+            postCount: 1,
+            elapsedMs: Date.now() - conditionAttemptBatchStartedAt
+          })
+        );
+      } catch (error) {
+        // Fairness information may lag if Apps Script is busy, but product
+        // acquisition/persistence must remain unaffected.
+        console.warn(
+          '⚠️ Condition attempt batch送信失敗。公平性情報のみ次回へ繰越:',
+          JSON.stringify({
+            count: conditionAttemptBatch.size,
+            error: error && error.message
+              ? error.message
+              : String(error)
+          })
+        );
+      }
     }
 
 
