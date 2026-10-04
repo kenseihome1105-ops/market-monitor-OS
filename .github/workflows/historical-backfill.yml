@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: market-monitor-os-production
+  group: market-monitor-os-backfill
   queue: max
   cancel-in-progress: false
 
@@ -32,6 +32,7 @@ jobs:
     outputs:
       has_more: ${{ steps.run-backfill.outputs.has_more }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -67,6 +68,7 @@ jobs:
       ${{ inputs.auto_continue && !inputs.force && inputs.db_item_id == '' &&
           needs.historical-backfill.outputs.has_more == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       actions: write
 
@@ -85,3 +87,4 @@ jobs:
           --header "Authorization: Bearer ${GH_TOKEN}"
           --header "X-GitHub-Api-Version: 2022-11-28"
           --data '{"ref":"main","inputs":{"force":"false","db_item_id":"","auto_continue":"true"}}'
+

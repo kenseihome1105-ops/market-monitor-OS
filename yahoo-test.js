@@ -1,3 +1,5 @@
+const { selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
+const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
@@ -132,6 +134,7 @@ async function postAppsScriptJsonWithRetry_(payload, label) {
         MARKET_INGEST_URL,
         {
           method: 'POST',
+          signal: AbortSignal.timeout(payload.action === 'runMarketValuation' ? 390000 : 90000),
           headers: {
             'Content-Type': 'application/json'
           },
@@ -160,7 +163,7 @@ async function postAppsScriptJsonWithRetry_(payload, label) {
       response.headers.get('content-type') || '';
 
     console.log(`[${label}] HTTP:`, response.status);
-    console.log(`[${label}] Final URL:`, response.url);
+    console.log(`[${label}] Final URL:`, String(response.url || '').split('?')[0]);
     console.log(`[${label}] Content-Type:`, contentType);
 
     if (!response.ok) {
@@ -242,7 +245,7 @@ async function postAppsScriptJsonWithRetry_(payload, label) {
 // Apps Script送信
 // ============================================================
 
-async function sendToAppsScript(items, conditionId) {
+async function sendToAppsScript(items, conditionId, options = {}) {
 
   if (!MARKET_INGEST_URL) {
     throw new Error('MARKET_INGEST_URL が設定されていません');
@@ -257,6 +260,9 @@ async function sendToAppsScript(items, conditionId) {
       secret: MARKET_INGEST_SECRET,
       market: MARKET,
       conditionId,
+      includeMarketCompsTargets: !FAST_MODE,
+      includeTrackedYahoo: !FAST_MODE,
+      detailVerified: options.detailVerified === true,
       items
     },
     `Ingest ${conditionId}`
@@ -2234,8 +2240,13 @@ async function main() {
   // 市場監視設定からYahooのON条件を取得
   // ========================================================
 
-  const configs =
-    await getYahooConfigs();
+  if (FAST_MODE) {
+    const capability = await postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
+    if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
+  }
+  const configs = selectConditionShard_(await getYahooConfigs());
+  const budgetStartedAt = Date.now();
+  let deferredConditions = 0;
 
 
   if (
@@ -2299,7 +2310,7 @@ async function main() {
 
     const conditionFailures = await runConditionsIndependently_(
       configs,
-      async (config, i) => {
+      async (config, i) => runYahooDiscoveryCondition_(async () => {
 
 
       console.log(
@@ -2598,7 +2609,16 @@ async function main() {
       }
 
       return { ok: true };
-      },
+      }, {
+        fastMode: FAST_MODE,
+        circuitOpen: yahooSearchCircuitOpen,
+        budgetExpired: Date.now() - budgetStartedAt > 16 * 60000,
+        acknowledge: () => postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt'),
+        onDeferred: reason => {
+          deferredConditions++;
+          console.warn('YAHOO_CONDITION_DEFERRED:', JSON.stringify({ conditionId: config.conditionId, reason, cursorPreserved: true }));
+        }
+      }),
       failure => {
         console.error(
           '⚠️ 条件監視失敗。後続条件へ継続します:',
@@ -2640,10 +2660,11 @@ async function main() {
     );
 
 
-    await trackExistingYahooItems(
+    if (!FAST_MODE) await trackExistingYahooItems(
       context,
-      trackedYahoo
+      prioritizeYahooTargets_(trackedYahoo)
     );
+    console.log('YAHOO_SHARD_SUMMARY:', JSON.stringify({ conditions: configs.length, failed: conditionFailures.length, deferred: deferredConditions, searchCircuitOpen: yahooSearchCircuitOpen, deadlineTracking: FAST_MODE ? 'SEPARATE_WORKER' : 'INLINE' }));
 
     if (conditionFailures.length > 0) {
       console.error(
@@ -2652,7 +2673,7 @@ async function main() {
       );
       throw new Error(
         `Yahoo監視条件${conditionFailures.length}件に失敗しました。` +
-        '後続条件の走査と既存商品の追跡は完了しています。'
+        (FAST_MODE ? '未走査条件は保存位置を維持。既存商品の終了間近追跡は別ワーカーです。' : '後続条件の走査と既存商品の追跡は完了しています。')
       );
     }
 
@@ -2680,7 +2701,7 @@ async function main() {
 // 実行
 // ============================================================
 
-main()
+if (require.main === module) main()
   .catch(
     error => {
 
@@ -2700,3 +2721,6 @@ main()
 
     }
   );
+
+
+module.exports = { scanTrackedYahooItem, postAppsScriptJson_, sendToAppsScript };
