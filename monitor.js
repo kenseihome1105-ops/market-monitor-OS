@@ -3695,8 +3695,46 @@ async function main() {
       );
     }
 
-    if (FAST_MODE && succeededConditions > 0) {
-      await postAppsScriptJson({ secret: INGEST_SECRET, action: 'runProcurementNotifications', markets: [MARKET] }, 'Procurement notifications');
+    // LINE通知は4シャード全部から同時実行せず、shard 0だけに集約する。
+    // 商品取込・カーソル保存とは独立した後段処理なので、一時的なApps Script障害は
+    // 次回のshard 0実行へ繰り越し、本当の通知ロジック異常だけをfatalに残す。
+    const monitorShardIndex = Number(process.env.MONITOR_SHARD_INDEX || 0);
+    if (FAST_MODE && monitorShardIndex === 0) {
+      try {
+        await postAppsScriptJson(
+          {
+            secret: INGEST_SECRET,
+            action: 'runProcurementNotifications',
+            markets: [MARKET]
+          },
+          'Procurement notifications'
+        );
+      } catch (error) {
+        const notificationErrorMessage =
+          error && error.message
+            ? String(error.message)
+            : String(error);
+
+        const transientNotificationFailure =
+          notificationErrorMessage.includes('busy') ||
+          /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(notificationErrorMessage) ||
+          notificationErrorMessage.includes('応答がJSONではありません') ||
+          notificationErrorMessage.includes('通信失敗:');
+
+        if (transientNotificationFailure) {
+          console.warn(
+            '⚠️ Procurement notifications一時障害。次回shard 0へ繰越:',
+            notificationErrorMessage
+          );
+        } else {
+          throw error;
+        }
+      }
+    } else if (FAST_MODE) {
+      console.log(
+        'Procurement notifications: shard 0に集約のためこのshardではスキップ',
+        monitorShardIndex
+      );
     }
     if (FAST_MODE && fatalFailedConditions.length) throw new Error(`Mercari failed conditions: ${fatalFailedConditions.length}; cursors preserved`);
     console.log('MONITOR_SHARD_SUMMARY:', JSON.stringify({
