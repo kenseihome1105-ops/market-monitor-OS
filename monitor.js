@@ -3540,14 +3540,22 @@ async function main() {
             ? error.message
             : String(error);
 
-        const cursorBusyDeferred =
-          errorMessage.includes('Scan cursor') &&
-          errorMessage.includes('"error":"busy"');
+        const appsScriptTransientDeferred =
+          (
+            errorMessage.startsWith('Ingest ') ||
+            errorMessage.startsWith('Scan cursor ')
+          ) &&
+          (
+            errorMessage.includes('"error":"busy"') ||
+            /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(errorMessage) ||
+            errorMessage.includes('応答がJSONではありません') ||
+            errorMessage.includes('通信失敗:')
+          );
 
-        if (cursorBusyDeferred) {
+        if (appsScriptTransientDeferred) {
           deferredConditions++;
           console.warn(
-            '⚠️ カーソル保存のみbusy。商品取込済みのため次回再走査へ:',
+            '⚠️ Apps Script一時障害。カーソルを進めず次回再走査へ:',
             JSON.stringify({
               conditionId: config.conditionId || 'UNKNOWN',
               searchName: config.searchName || '',
