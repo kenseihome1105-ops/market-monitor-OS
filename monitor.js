@@ -3376,7 +3376,48 @@ async function main() {
     const capability = await postAppsScriptJson({ secret: INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
     if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
   }
-  const configs = selectConditionShard_(await getMercariConfigs());
+
+  let rawConfigs;
+  try {
+    rawConfigs = await getMercariConfigs();
+  } catch (error) {
+    const configErrorMessage =
+      error && error.message
+        ? String(error.message)
+        : String(error);
+
+    const transientConfigFailure =
+      /Config HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(configErrorMessage) ||
+      configErrorMessage.includes('Config応答がJSONではありません') ||
+      configErrorMessage.includes('Config通信失敗:') ||
+      configErrorMessage.includes('\"error\":\"busy\"');
+
+    // FAST_MODEでは直前のCapabilities取得とversion確認が成功している。
+    // そのため、Configだけが一時的な404/HTML/通信失敗になった場合は
+    // エンドポイント全体の恒久障害とはみなさず、このshardだけ次回へ繰り越す。
+    // Configの未知エラーやCapabilities異常は従来どおりfatalのまま。
+    if (FAST_MODE && transientConfigFailure) {
+      console.warn(
+        '⚠️ Config一時障害。Capabilities正常確認済みのためこのshardは次回へ繰越:',
+        configErrorMessage
+      );
+      console.log(
+        'MONITOR_SHARD_SUMMARY:',
+        JSON.stringify({
+          conditions: 0,
+          succeeded: 0,
+          failed: 0,
+          preservedEmpty: 0,
+          deferred: 'CONFIG_UNAVAILABLE'
+        })
+      );
+      return;
+    }
+
+    throw error;
+  }
+
+  const configs = selectConditionShard_(rawConfigs);
   const budgetStartedAt = Date.now();
   let deferredConditions = 0;
 
