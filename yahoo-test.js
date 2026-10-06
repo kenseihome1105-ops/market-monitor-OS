@@ -2249,7 +2249,52 @@ async function main() {
     const capability = await postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
     if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
   }
-  const configs = selectConditionShard_(await getYahooConfigs());
+  let rawConfigs;
+
+  try {
+    rawConfigs = await getYahooConfigs();
+  } catch (error) {
+    const configErrorMessage =
+      error && error.message
+        ? String(error.message)
+        : String(error);
+
+    const transientConfigFailure =
+      /Config HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(configErrorMessage) ||
+      configErrorMessage.includes('Config応答がJSONではありません') ||
+      configErrorMessage.includes('Config通信失敗:') ||
+      configErrorMessage.includes('"error":"busy"');
+
+    // FAST_MODEでは直前のCapabilities取得とversion確認が成功済み。
+    // Configだけが一時的な404/HTML/通信失敗になった場合は、
+    // このshardだけ次回へ繰り越し、保存カーソルは触らない。
+    // 未知のConfigエラーやCapabilities異常は従来どおりfatal。
+    if (FAST_MODE && transientConfigFailure) {
+      console.warn(
+        'YAHOO_CONFIG_DEFERRED: Capabilities正常確認済みのためこのshardは次回へ繰越:',
+        configErrorMessage
+      );
+
+      console.log(
+        'YAHOO_SHARD_SUMMARY:',
+        JSON.stringify({
+          conditions: 0,
+          failed: 0,
+          transientDeferred: 0,
+          deferred: 0,
+          configUnavailable: true,
+          searchCircuitOpen: false,
+          deadlineTracking: 'SEPARATE_WORKER'
+        })
+      );
+
+      return;
+    }
+
+    throw error;
+  }
+
+  const configs = selectConditionShard_(rawConfigs);
   const budgetStartedAt = Date.now();
   let deferredConditions = 0;
 
