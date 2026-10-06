@@ -2787,17 +2787,39 @@ async function main() {
       prioritizeYahooTargets_(trackedYahoo)
     );
 
-    const transientDeferredFailures = conditionFailures.filter(failure =>
-      failure &&
-      typeof failure.error === 'string' &&
-      (
-        failure.error.includes('"error":"busy"') ||
+    const transientDeferredFailures = conditionFailures.filter(failure => {
+      if (
+        !failure ||
+        typeof failure.error !== 'string'
+      ) {
+        return false;
+      }
+
+      const errorMessage = failure.error;
+
+      const appsScriptTransientDeferred =
+        (
+          errorMessage.startsWith('Ingest ') ||
+          errorMessage.startsWith('Scan cursor ')
+        ) &&
+        (
+          /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(errorMessage) ||
+          errorMessage.includes('応答がJSONではありません') ||
+          errorMessage.includes('通信失敗:')
+        );
+
+      return (
+        // 既存仕様どおりbusyは一時失敗として次回へ。
+        errorMessage.includes('"error":"busy"') ||
+        // Apps Script ContentServiceの一時404/HTML/通信失敗も、
+        // Ingest/カーソル保存に限って次回再走査へ繰り越す。
+        appsScriptTransientDeferred ||
         (
           yahooSearchCircuitOpen &&
-          failure.error.startsWith('Yahoo検索に失敗:')
+          errorMessage.startsWith('Yahoo検索に失敗:')
         )
-      )
-    );
+      );
+    });
     const fatalConditionFailures = conditionFailures.filter(
       failure => !transientDeferredFailures.includes(failure)
     );
