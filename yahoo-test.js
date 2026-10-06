@@ -1,4 +1,9 @@
 const { selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
+const {
+  createConditionAttemptBatch_,
+  recordConditionAttempt_,
+  buildConditionAttemptBatchPayload_
+} = require('./condition-attempt-batch');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
@@ -2307,6 +2312,11 @@ async function main() {
     let consecutiveGlobalFailureConditions = 0;
     let yahooSearchCircuitOpen = false;
 
+    // 実際に走査へ入る条件だけattempt時刻をローカル記録し、
+    // shard終了時に1回のPOSTへまとめる。
+    const conditionAttemptBatch =
+      createConditionAttemptBatch_();
+
 
     const conditionFailures = await runConditionsIndependently_(
       configs,
@@ -2634,7 +2644,11 @@ async function main() {
         fastMode: FAST_MODE,
         circuitOpen: yahooSearchCircuitOpen,
         budgetExpired: Date.now() - budgetStartedAt > 16 * 60000,
-        acknowledge: () => postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'ackConditionAttempt', itemIds: [config.conditionId] }, 'Condition attempt'),
+        acknowledge: () => recordConditionAttempt_(
+          conditionAttemptBatch,
+          config.conditionId,
+          Date.now()
+        ),
         onDeferred: reason => {
           deferredConditions++;
           console.warn('YAHOO_CONDITION_DEFERRED:', JSON.stringify({ conditionId: config.conditionId, reason, cursorPreserved: true }));
@@ -2647,6 +2661,48 @@ async function main() {
         );
       }
     );
+
+
+    if (
+      FAST_MODE &&
+      conditionAttemptBatch.size > 0
+    ) {
+      const conditionAttemptBatchStartedAt = Date.now();
+
+      try {
+        const payload =
+          buildConditionAttemptBatchPayload_(
+            conditionAttemptBatch,
+            MARKET_INGEST_SECRET
+          );
+
+        await postAppsScriptJson_(
+          payload,
+          'Condition attempt batch'
+        );
+
+        console.log(
+          '[TIMING] Condition attempt batch:',
+          JSON.stringify({
+            count: payload.attempts.length,
+            postCount: 1,
+            elapsedMs: Date.now() - conditionAttemptBatchStartedAt
+          })
+        );
+      } catch (error) {
+        // attempt公平性情報だけを次回へ繰り越す。
+        // 商品取得・Ingest・カーソル保存の成否には影響させない。
+        console.warn(
+          '⚠️ Yahoo Condition attempt batch送信失敗。公平性情報のみ次回へ繰越:',
+          JSON.stringify({
+            count: conditionAttemptBatch.size,
+            error: error && error.message
+              ? error.message
+              : String(error)
+          })
+        );
+      }
+    }
 
 
     await searchPage.close();
