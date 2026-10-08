@@ -262,7 +262,13 @@ async function postAppsScriptJsonWithRetry_(
 
             method:
               'POST',
-            signal: AbortSignal.timeout(payload.action === 'runMarketValuation' ? 390000 : 90000),
+            signal: AbortSignal.timeout(
+              payload.action === 'runMarketValuation'
+                ? 390000
+                : payload.action === 'upsertMarketCompsBatch'
+                  ? 240000
+                  : 90000
+            ),
 
             redirect:
               'follow',
@@ -2657,7 +2663,8 @@ async function runYahooMarketCompsForTarget_(
   page,
   insertedItem,
   config,
-  marketCompsCache
+  marketCompsCache,
+  options
 ) {
 
   const target =
@@ -2885,31 +2892,62 @@ async function runYahooMarketCompsForTarget_(
   );
 
 
+  const ingestPayload = {
+    source:
+      'Yahoo closedsearch',
+
+    sourceVersion:
+      MARKET_COMPS_SOURCE_VERSION,
+
+    query,
+
+    categoryId,
+
+    target,
+
+    comparisons
+  };
+
+
+  if (
+    options &&
+    options.deferIngest === true
+  ) {
+
+    console.log(
+      '📦 Yahoo Market Comps DEFER INGEST',
+      target.itemId,
+      'comparisons=',
+      comparisons.length
+    );
+
+    return {
+      ok: true,
+      action:
+        'prepareMarketComps',
+      targetKey:
+        target.targetKey,
+      itemId:
+        target.itemId,
+      payload:
+        ingestPayload
+    };
+
+  }
+
+
   const ingestResult =
     await postAppsScriptJson(
-      {
+      Object.assign(
+        {
+          secret:
+            INGEST_SECRET,
 
-        secret:
-          INGEST_SECRET,
-
-        action:
-          'upsertMarketComps',
-
-        source:
-          'Yahoo closedsearch',
-
-        sourceVersion:
-          MARKET_COMPS_SOURCE_VERSION,
-
-        query,
-
-        categoryId,
-
-        target,
-
-        comparisons
-
-      },
+          action:
+            'upsertMarketComps'
+        },
+        ingestPayload
+      ),
 
       `MarketComps ${target.itemId}`
     );

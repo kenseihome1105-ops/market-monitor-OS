@@ -42,6 +42,7 @@ async function main() {
   const start = Date.now();
   const failures = [];
   const comparisonAttempts = [];
+  const preparedComparisons = [];
 
   let completed = 0;
   let attempted = 0;
@@ -74,14 +75,31 @@ async function main() {
       attempted++;
 
       try {
-        await runYahooMarketCompsForTarget_(
-          page,
-          target,
-          target,
-          cache
-        );
+        const prepared =
+          await runYahooMarketCompsForTarget_(
+            page,
+            target,
+            target,
+            cache,
+            {
+              deferIngest: true
+            }
+          );
 
-        completed++;
+        if (
+          !prepared ||
+          prepared.action !== 'prepareMarketComps' ||
+          !prepared.payload
+        ) {
+          throw new Error(
+            'MarketComps prepare response is invalid'
+          );
+        }
+
+        preparedComparisons.push({
+          target,
+          payload: prepared.payload
+        });
 
       } catch (error) {
         failures.push({
@@ -93,6 +111,122 @@ async function main() {
 
   } finally {
     await browser.close();
+  }
+
+  if (
+    preparedComparisons.length > 0
+  ) {
+    const batchStartedAt =
+      Date.now();
+
+    try {
+      const batch =
+        await postAppsScriptJson(
+          {
+            secret,
+            action:
+              'upsertMarketCompsBatch',
+            items:
+              preparedComparisons.map(
+                entry => entry.payload
+              )
+          },
+          'MarketComps batch'
+        );
+
+      if (
+        batch.action !==
+        'upsertMarketCompsBatch'
+        ||
+        !Array.isArray(
+          batch.results
+        )
+      ) {
+        throw new Error(
+          'MarketComps batch response is invalid'
+        );
+      }
+
+      preparedComparisons.forEach(
+        (entry, index) => {
+          const result =
+            batch.results[index];
+
+          if (
+            result &&
+            result.ok === true
+          ) {
+            completed++;
+
+            console.log(
+              '✅ Yahoo Market Comps BATCH SUCCESS',
+              entry.target.itemId,
+              'received=',
+              result.received,
+              'inserted=',
+              result.inserted,
+              'updated=',
+              result.updated,
+              'skipped=',
+              result.skipped
+            );
+
+            return;
+          }
+
+          failures.push({
+            itemId:
+              entry.target.itemId,
+            error:
+              result &&
+              result.error
+                ? String(result.error)
+                : 'MarketComps batch item failed'
+          });
+        }
+      );
+
+      console.log(
+        '[TIMING] MarketComps batch:',
+        JSON.stringify({
+          count:
+            preparedComparisons.length,
+          postCount:
+            1,
+          elapsedMs:
+            Date.now() -
+            batchStartedAt,
+          succeeded:
+            completed,
+          failed:
+            preparedComparisons.length -
+            completed
+        })
+      );
+
+    } catch (error) {
+      preparedComparisons.forEach(
+        entry => {
+          failures.push({
+            itemId:
+              entry.target.itemId,
+            error:
+              error &&
+              error.message
+                ? error.message
+                : String(error)
+          });
+        }
+      );
+
+      console.error(
+        '❌ MarketComps batch送信失敗:',
+        error &&
+        error.message
+          ? error.message
+          : String(error)
+      );
+    }
   }
 
   if (
@@ -164,6 +298,8 @@ async function main() {
       pending:
         response.pending,
       attempted,
+      prepared:
+        preparedComparisons.length,
       completed,
       deferred:
         Math.max(
