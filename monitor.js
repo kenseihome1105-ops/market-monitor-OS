@@ -1794,7 +1794,10 @@ async function extractYahooClosedItems_(
       const anchors =
         Array.from(
           document.querySelectorAll(
-            'a[href*="/jp/auction/"]'
+            [
+              'a[href*="/jp/auction/"]',
+              'a[href*="paypayfleamarket.yahoo.co.jp/item/"]'
+            ].join(',')
           )
         );
 
@@ -1839,10 +1842,21 @@ async function extractYahooClosedItems_(
         }
 
 
-        const idMatch =
+        const auctionIdMatch =
           href.match(
             /\/jp\/auction\/([^/?#]+)/
           );
+
+
+        const fleaIdMatch =
+          href.match(
+            /paypayfleamarket\.yahoo\.co\.jp\/item\/([^/?#]+)/
+          );
+
+
+        const idMatch =
+          auctionIdMatch ||
+          fleaIdMatch;
 
 
         if (
