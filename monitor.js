@@ -3574,6 +3574,14 @@ async function main() {
         throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
       }
 
+      console.log(
+        'MONITOR_CURSOR_ACK_CAPABILITY:',
+        JSON.stringify({
+          enabled: CURSOR_ACK_BATCH_MODE,
+          version: String(capability.cursorAckBatchVersion || '')
+        })
+      );
+
       if (
         CURSOR_ACK_BATCH_MODE &&
         capability.cursorAckBatchVersion !== 'CURSOR_ACK_BATCH_V1_20261012'
