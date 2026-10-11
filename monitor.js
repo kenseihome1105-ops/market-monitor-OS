@@ -3671,7 +3671,11 @@ async function main() {
     rawConfigs,
     dueSelectionAt
   );
-  const configs = selectConditionShard_(dueConfigs);
+  const configs = selectConditionShard_(
+    dueConfigs,
+    process.env,
+    dueSelectionAt
+  );
 
   console.log(
     'MONITOR_DUE_SUMMARY:',
