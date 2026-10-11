@@ -291,7 +291,10 @@ async function postAppsScriptJsonWithRetry_(
                 ? 390000
                 : payload.action === 'upsertMarketCompsBatch'
                   ? 240000
-                  : 90000
+                  : payload.action === 'ackMarketScanCursor' ||
+                    payload.action === 'ackConditionAttempt'
+                    ? 30000
+                    : 90000
             ),
 
             redirect:
