@@ -8,14 +8,13 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: market-monitor-os-mercari-discovery
-  cancel-in-progress: false
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    concurrency:
+      group: market-monitor-os-mercari-discovery-${{ matrix.shard }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       max-parallel: 4
