@@ -462,6 +462,78 @@ async function getYahooConfigs() {
 // 既存商品の詳細追跡は止めない。
 // ============================================================
 
+async function collectYahooResultDomDiagnostic_(page) {
+  return page.evaluate(() => {
+    const auctionLinks = Array.from(
+      document.querySelectorAll('a[href*="/jp/auction/"]')
+    );
+
+    const uniqueAuctionHrefs = Array.from(
+      new Set(
+        auctionLinks
+          .map(link => String(link.getAttribute('href') || '').trim())
+          .filter(Boolean)
+      )
+    );
+
+    const samples = auctionLinks.slice(0, 5).map(link => {
+      const ancestors = [];
+      let current = link;
+
+      for (let depth = 0; depth < 5 && current; depth++) {
+        ancestors.push({
+          tag: String(current.tagName || ''),
+          className: String(current.className || '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 180)
+        });
+        current = current.parentElement;
+      }
+
+      let hrefPath = '';
+      try {
+        hrefPath = new URL(link.href, window.location.origin).pathname;
+      } catch (error) {
+        hrefPath = '';
+      }
+
+      return {
+        hrefPath,
+        ancestors
+      };
+    });
+
+    const ancestorCounts = new Map();
+
+    for (const link of auctionLinks.slice(0, 50)) {
+      let current = link.parentElement;
+
+      for (let depth = 0; depth < 4 && current; depth++) {
+        const tag = String(current.tagName || '');
+        const className = String(current.className || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 180);
+        const key = tag + (className ? '.' + className.replace(/\s+/g, '.') : '');
+        ancestorCounts.set(key, (ancestorCounts.get(key) || 0) + 1);
+        current = current.parentElement;
+      }
+    }
+
+    return {
+      auctionLinkCount: auctionLinks.length,
+      uniqueAuctionHrefCount: uniqueAuctionHrefs.length,
+      commonAncestors: Array.from(ancestorCounts.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 12)
+        .map(([selectorish, count]) => ({ selectorish, count })),
+      samples
+    };
+  });
+}
+
+
 async function scanYahooSearch(
   page,
   config,
@@ -751,6 +823,12 @@ async function scanYahooSearchImpl_(
               diagnostic.bodySnippet = '[本文を取得できません]';
             }
 
+            try {
+              diagnostic.domStructure = await collectYahooResultDomDiagnostic_(page);
+            } catch (error) {
+              diagnostic.domStructure = { error: 'DOM_DIAGNOSTIC_FAILED' };
+            }
+
             console.warn(
               'Yahoo検索HTTP 200で正規検索結果ルート以外へ移動:',
               JSON.stringify(diagnostic)
@@ -794,6 +872,12 @@ async function scanYahooSearchImpl_(
                 .slice(0, 200);
             } catch (error) {
               diagnostic.bodySnippet = '[本文を取得できません]';
+            }
+
+            try {
+              diagnostic.domStructure = await collectYahooResultDomDiagnostic_(page);
+            } catch (error) {
+              diagnostic.domStructure = { error: 'DOM_DIAGNOSTIC_FAILED' };
             }
 
             console.warn(
