@@ -507,7 +507,7 @@ async function postAppsScriptJsonWithRetry_(
       ) {
 
         console.warn(
-          `[${label}] Apps Scriptのwrite lock競合を一時エラーとして再試行します`
+          `[${label}] Apps Script一時エラーとして再試行します`
         );
 
         continue;
@@ -3474,8 +3474,48 @@ async function main() {
   // ========================================================
 
   if (FAST_MODE) {
-    const capability = await postAppsScriptJson({ secret: INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
-    if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
+    try {
+      const capability = await postAppsScriptJson(
+        { secret: INGEST_SECRET, action: 'getMonitorCapabilities' },
+        'Capabilities'
+      );
+
+      if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') {
+        throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
+      }
+    } catch (error) {
+      const capabilityErrorMessage =
+        error && error.message
+          ? String(error.message)
+          : String(error);
+
+      const transientCapabilityFailure =
+        /Capabilities HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(capabilityErrorMessage) ||
+        capabilityErrorMessage.includes('Capabilities応答がJSONではありません') ||
+        capabilityErrorMessage.includes('Capabilities通信失敗:') ||
+        capabilityErrorMessage.includes('\"error\":\"busy\"') ||
+        capabilityErrorMessage.includes('Service Spreadsheets failed while accessing document');
+
+      if (transientCapabilityFailure) {
+        console.warn(
+          '⚠️ Capabilities一時障害。このshardはカーソルを進めず次回へ繰越:',
+          capabilityErrorMessage
+        );
+        console.log(
+          'MONITOR_SHARD_SUMMARY:',
+          JSON.stringify({
+            conditions: 0,
+            succeeded: 0,
+            failed: 0,
+            preservedEmpty: 0,
+            deferred: 'CAPABILITIES_UNAVAILABLE'
+          })
+        );
+        return;
+      }
+
+      throw error;
+    }
   }
 
   let rawConfigs;
@@ -3491,7 +3531,8 @@ async function main() {
       /Config HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(configErrorMessage) ||
       configErrorMessage.includes('Config応答がJSONではありません') ||
       configErrorMessage.includes('Config通信失敗:') ||
-      configErrorMessage.includes('\"error\":\"busy\"');
+      configErrorMessage.includes('\"error\":\"busy\"') ||
+      configErrorMessage.includes('Service Spreadsheets failed while accessing document');
 
     // FAST_MODEでは直前のCapabilities取得とversion確認が成功している。
     // そのため、Configだけが一時的な404/HTML/通信失敗になった場合は
@@ -3876,6 +3917,7 @@ async function main() {
 
         const transientNotificationFailure =
           notificationErrorMessage.includes('busy') ||
+          notificationErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
           /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(notificationErrorMessage) ||
           notificationErrorMessage.includes('応答がJSONではありません') ||
           notificationErrorMessage.includes('通信失敗:');
