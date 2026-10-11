@@ -38,6 +38,25 @@ test('retries transient Spreadsheet service failures while attempts remain', () 
   );
 });
 
+test('retries ScriptLock busy responses while attempts remain', () => {
+  assert.equal(
+    shouldRetryAppsScriptResult_(
+      { ok: false, error: 'dirty世代開始: ScriptLock busy' },
+      1,
+      5
+    ),
+    true
+  );
+  assert.equal(
+    shouldRetryAppsScriptResult_(
+      { ok: false, error: 'dirty世代開始: ScriptLock busy' },
+      5,
+      5
+    ),
+    false
+  );
+});
+
 test('does not retry success or permanent Apps Script errors', () => {
   assert.equal(
     shouldRetryAppsScriptResult_({ ok: true }, 1, 5),
