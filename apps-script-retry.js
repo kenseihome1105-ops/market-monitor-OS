@@ -46,7 +46,8 @@ function shouldRetryAppsScriptResult_(result, attempt, maxAttempts) {
     : '';
   const retryableBusy =
     errorText === 'busy' ||
-    errorText.endsWith(': busy');
+    errorText.endsWith(': busy') ||
+    errorText.includes('ScriptLock busy');
 
   const retryableSpreadsheetService =
     errorText.includes(
