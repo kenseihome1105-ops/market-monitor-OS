@@ -32,6 +32,7 @@ jobs:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
           MARKET_INGEST_SECRET: ${{ secrets.MARKET_INGEST_SECRET }}
           MONITOR_FAST_MODE: "true"
+          MONITOR_CURSOR_ACK_BATCH_MODE: "true"
           MONITOR_SHARD_COUNT: "4"
           MONITOR_SHARD_INDEX: ${{ matrix.shard }}
         run: node monitor.js
