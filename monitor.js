@@ -1,4 +1,4 @@
-const { selectMercariHeadGap_, selectConditionShard_, selectDueConditions_ } = require('./monitor-priority');
+const { selectMercariHeadGap_, selectConditionShard_, selectConditionShardLegacy_, selectDueConditions_, selectDueConditionsLegacy_ } = require('./monitor-priority');
 const {
   createConditionAttemptBatch_,
   recordConditionAttempt_,
@@ -13,6 +13,8 @@ const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const CURSOR_ACK_BATCH_MODE =
   process.env.MONITOR_CURSOR_ACK_BATCH_MODE === 'true';
 const CURSOR_ACK_BATCH_FLUSH_SIZE = 20;
+const HOT_SCHEDULER_MODE =
+  process.env.MONITOR_HOT_SCHEDULER_MODE === 'true';
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
@@ -3582,6 +3584,21 @@ async function main() {
         })
       );
 
+      console.log(
+        'MONITOR_HOT_PRIORITY_CAPABILITY:',
+        JSON.stringify({
+          enabled: HOT_SCHEDULER_MODE,
+          version: String(capability.hotPriorityVersion || '')
+        })
+      );
+
+      if (
+        HOT_SCHEDULER_MODE &&
+        capability.hotPriorityVersion !== 'HOT_PRIORITY_META_V1_20261012'
+      ) {
+        throw new Error('Deploy HOT_PRIORITY_META_V1_20261012 before hot scheduling');
+      }
+
       if (
         CURSOR_ACK_BATCH_MODE &&
         capability.cursorAckBatchVersion !== 'CURSOR_ACK_BATCH_V1_20261012'
@@ -3667,11 +3684,25 @@ async function main() {
   }
 
   const dueSelectionAt = Date.now();
-  const dueConfigs = selectDueConditions_(
-    rawConfigs,
-    dueSelectionAt
-  );
-  const configs = selectConditionShard_(dueConfigs);
+  const dueConfigs = HOT_SCHEDULER_MODE
+    ? selectDueConditions_(
+        rawConfigs,
+        dueSelectionAt
+      )
+    : selectDueConditionsLegacy_(
+        rawConfigs,
+        dueSelectionAt
+      );
+  const configs = HOT_SCHEDULER_MODE
+    ? selectConditionShard_(
+        dueConfigs,
+        process.env,
+        dueSelectionAt
+      )
+    : selectConditionShardLegacy_(
+        dueConfigs,
+        process.env
+      );
 
   console.log(
     'MONITOR_DUE_SUMMARY:',
