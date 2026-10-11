@@ -674,6 +674,28 @@ async function getMercariConfigs() {
     '件'
   );
 
+  console.log(
+    'MONITOR_TIMESTAMP_FIELDS:',
+    JSON.stringify({
+      total: validConfigs.length,
+      lastAttemptAtPresent: validConfigs.filter(
+        config => Number(config.lastAttemptAt || 0) > 0
+      ).length,
+      lastScanCompletedAtPresent: validConfigs.filter(
+        config => Number(config.lastScanCompletedAt || 0) > 0
+      ).length,
+      legacyLastScannedAtPresent: validConfigs.filter(
+        config => Number(config.lastScannedAt || 0) > 0
+      ).length,
+      sample: validConfigs.slice(0, 5).map(config => ({
+        conditionId: config.conditionId,
+        lastAttemptAt: Number(config.lastAttemptAt || 0),
+        lastScanCompletedAt: Number(config.lastScanCompletedAt || 0),
+        lastScannedAt: Number(config.lastScannedAt || 0)
+      }))
+    })
+  );
+
 
   return validConfigs;
 
