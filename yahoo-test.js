@@ -4,6 +4,7 @@ const {
   recordConditionAttempt_,
   buildConditionAttemptBatchPayload_
 } = require('./condition-attempt-batch');
+const { appsScriptRetryDelayMs_ } = require('./apps-script-retry');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const { chromium } = require('playwright');
 const {
@@ -106,15 +107,31 @@ async function postAppsScriptJson_(payload, label) {
 async function postAppsScriptJsonWithRetry_(payload, label) {
   let lastError = null;
 
+  const retryIdentity = [
+    process.env.GITHUB_WORKFLOW || 'local',
+    process.env.GITHUB_RUN_ID || '',
+    process.env.GITHUB_JOB || '',
+    process.env.MONITOR_SHARD_INDEX || '',
+    String(label || ''),
+    String(payload && payload.action || '')
+  ].join('|');
+
   for (
     let attempt = 1;
     attempt <= APPS_SCRIPT_MAX_ATTEMPTS;
     attempt++
   ) {
-    const delayMs =
+    const baseDelayMs =
       Number(
         APPS_SCRIPT_RETRY_DELAYS_MS[attempt - 1] ||
         0
+      );
+
+    const delayMs =
+      appsScriptRetryDelayMs_(
+        baseDelayMs,
+        retryIdentity,
+        attempt
       );
 
     if (delayMs > 0) {
