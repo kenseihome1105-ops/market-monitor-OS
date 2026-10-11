@@ -33,6 +33,41 @@ function selectMercariHeadGap_(ids, state = {}, reachedBottom = false, limit = 1
   };
 }
 
+function selectConditionShardLegacy_(configs, env = process.env) {
+  const count = Number(env.MONITOR_SHARD_COUNT || 1);
+  const index = Number(env.MONITOR_SHARD_INDEX || 0);
+  if (!Number.isInteger(count) || count < 1 || !Number.isInteger(index) || index < 0 || index >= count) {
+    throw new Error('Invalid condition shard');
+  }
+  const hash = id => {
+    let value = 2166136261;
+    for (const c of String(id)) value = Math.imul(value ^ c.charCodeAt(0), 16777619) >>> 0;
+    return value;
+  };
+  return (configs || []).filter(c => c && c.conditionId && hash(c.conditionId) % count === index).sort((a, b) =>
+    Number(a.lastScannedAt || 0) - Number(b.lastScannedAt || 0) ||
+    String(a.conditionId).localeCompare(String(b.conditionId))
+  );
+}
+
+function selectDueConditionsLegacy_(configs, now = Date.now()) {
+  const currentTime = Number(now);
+  if (!Number.isFinite(currentTime)) {
+    throw new Error('Invalid condition due timestamp');
+  }
+  return (configs || []).filter(config => {
+    if (!config || !config.conditionId) return false;
+    const configuredInterval = Number(config.intervalMinutes);
+    const intervalMinutes =
+      Number.isFinite(configuredInterval) && configuredInterval > 0
+        ? configuredInterval
+        : 5;
+    const lastScannedAt = Number(config.lastScannedAt || 0);
+    if (!Number.isFinite(lastScannedAt) || lastScannedAt <= 0) return true;
+    return currentTime - lastScannedAt >= intervalMinutes * 60000;
+  });
+}
+
 function monitoringIntervalMs_(config) {
   const configuredInterval = Number(config && config.intervalMinutes);
   const intervalMinutes =
@@ -256,7 +291,9 @@ async function runYahooDiscoveryCondition_(scan, options = {}) {
 module.exports = {
   selectMercariHeadGap_,
   selectConditionShard_,
+  selectConditionShardLegacy_,
   selectDueConditions_,
+  selectDueConditionsLegacy_,
   monitoringIntervalMs_,
   successfulScanCompletedAt_,
   conditionOverdueMs_,
