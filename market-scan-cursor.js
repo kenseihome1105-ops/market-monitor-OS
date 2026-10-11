@@ -322,6 +322,27 @@ function isYahooSearchResultsPage_(responseUrl, title) {
 }
 
 
+function isYahooAuctionResultsPageWithCards_(responseUrl, title, productCardCount) {
+  if (Number(productCardCount) < 1) {
+    return false;
+  }
+
+  let url;
+  try {
+    url = new URL(String(responseUrl || ''));
+  } catch (error) {
+    return false;
+  }
+
+  return (
+    url.protocol === 'https:' &&
+    url.hostname === 'auctions.yahoo.co.jp' &&
+    ['/search/search', '/opensearch'].includes(url.pathname) &&
+    String(title || '').includes('Yahoo!オークション')
+  );
+}
+
+
 function areAllYahooSearchResultsGlobalFailures_(results) {
   return (
     Array.isArray(results) &&
@@ -359,6 +380,7 @@ module.exports = {
   buildYahooScanUrl_,
   shouldAcceptYahoo404Search_,
   isYahooSearchResultsPage_,
+  isYahooAuctionResultsPageWithCards_,
   shouldOpenYahooSearchCircuit_,
   areAllYahooSearchResultsGlobalFailures_
 };
