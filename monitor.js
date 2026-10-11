@@ -1,4 +1,4 @@
-const { selectMercariHeadGap_, selectConditionShard_ } = require('./monitor-priority');
+const { selectMercariHeadGap_, selectConditionShard_, selectDueConditions_ } = require('./monitor-priority');
 const {
   createConditionAttemptBatch_,
   recordConditionAttempt_,
@@ -3493,7 +3493,24 @@ async function main() {
     throw error;
   }
 
-  const configs = selectConditionShard_(rawConfigs);
+  const dueSelectionAt = Date.now();
+  const dueConfigs = selectDueConditions_(
+    rawConfigs,
+    dueSelectionAt
+  );
+  const configs = selectConditionShard_(dueConfigs);
+
+  console.log(
+    'MONITOR_DUE_SUMMARY:',
+    JSON.stringify({
+      total: rawConfigs.length,
+      due: dueConfigs.length,
+      notDue: rawConfigs.length - dueConfigs.length,
+      selectedShard: configs.length,
+      evaluatedAt: dueSelectionAt
+    })
+  );
+
   const budgetStartedAt = Date.now();
   let deferredConditions = 0;
 

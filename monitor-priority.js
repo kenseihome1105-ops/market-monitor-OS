@@ -50,6 +50,44 @@ function selectConditionShard_(configs, env = process.env) {
   );
 }
 
+function selectDueConditions_(configs, now = Date.now()) {
+  const currentTime = Number(now);
+
+  if (!Number.isFinite(currentTime)) {
+    throw new Error('Invalid condition due timestamp');
+  }
+
+  return (configs || []).filter(config => {
+    if (!config || !config.conditionId) {
+      return false;
+    }
+
+    const configuredInterval =
+      Number(config.intervalMinutes);
+    const intervalMinutes =
+      Number.isFinite(configuredInterval) &&
+      configuredInterval > 0
+        ? configuredInterval
+        : 5;
+
+    const lastScannedAt =
+      Number(config.lastScannedAt || 0);
+
+    if (
+      !Number.isFinite(lastScannedAt) ||
+      lastScannedAt <= 0
+    ) {
+      return true;
+    }
+
+    return (
+      currentTime - lastScannedAt >=
+      intervalMinutes * 60000
+    );
+  });
+}
+
+
 function prioritizeYahooTargets_(items, now = Date.now()) {
   const byId = new Map();
   for (const item of items || []) {
@@ -79,4 +117,4 @@ async function runYahooDiscoveryCondition_(scan, options = {}) {
   return scan();
 }
 
-module.exports = { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ };
+module.exports = { selectMercariHeadGap_, selectConditionShard_, selectDueConditions_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ };

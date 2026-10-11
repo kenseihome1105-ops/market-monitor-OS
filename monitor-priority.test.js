@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { selectMercariHeadGap_, selectConditionShard_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
+const { selectMercariHeadGap_, selectConditionShard_, selectDueConditions_, prioritizeYahooTargets_, runYahooDiscoveryCondition_ } = require('./monitor-priority');
 const { enforceMercariActiveSearchUrl_, buildYahooScanUrl_, runConditionsIndependently_ } = require('./market-scan-cursor');
 const { processDeadlineBatch_ } = require('./yahoo-deadline-worker');
 const ids = (prefix, n) => Array.from({ length: n }, (_, i) => prefix + (i + 1));
@@ -71,6 +71,38 @@ test('oldest-attempt condition runs first without changing its saved cursor', ()
   const selected = selectConditionShard_(configs);
   assert.equal(selected[0].conditionId, 'b');
   assert.equal(selected[0].scanOffset, 20);
+});
+
+test('Mercari due selection honors each configured monitoring interval', () => {
+  const now = 2_000_000_000_000;
+  const configs = [
+    { conditionId:'five-due', intervalMinutes:5, lastScannedAt:now - 5 * 60000 },
+    { conditionId:'five-not-due', intervalMinutes:5, lastScannedAt:now - 4 * 60000 },
+    { conditionId:'thirty-due', intervalMinutes:30, lastScannedAt:now - 30 * 60000 },
+    { conditionId:'thirty-not-due', intervalMinutes:30, lastScannedAt:now - 29 * 60000 },
+    { conditionId:'never-attempted', intervalMinutes:30, lastScannedAt:0 }
+  ];
+
+  const due = selectDueConditions_(configs, now);
+
+  assert.deepEqual(
+    due.map(config => config.conditionId),
+    ['five-due', 'thirty-due', 'never-attempted']
+  );
+});
+
+test('Mercari due selection defaults invalid intervals to five minutes without mutating config', () => {
+  const now = 2_000_000_000_000;
+  const configs = [
+    { conditionId:'fallback-due', intervalMinutes:0, lastScannedAt:now - 5 * 60000, scanOffset:40 },
+    { conditionId:'fallback-not-due', intervalMinutes:'bad', lastScannedAt:now - 4 * 60000, scanOffset:20 }
+  ];
+  const saved = structuredClone(configs);
+
+  const due = selectDueConditions_(configs, now);
+
+  assert.deepEqual(due.map(config => config.conditionId), ['fallback-due']);
+  assert.deepEqual(configs, saved);
 });
 
 test('Yahoo deadline priority has no first-30 cap, excludes ended auctions and rotates attempts', () => {
