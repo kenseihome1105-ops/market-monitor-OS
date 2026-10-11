@@ -17,6 +17,7 @@ const {
   buildYahooScanUrl_,
   shouldAcceptYahoo404Search_,
   isYahooSearchResultsPage_,
+  isYahooAuctionResultsPageWithCards_,
   shouldOpenYahooSearchCircuit_,
   areAllYahooSearchResultsGlobalFailures_
 } = require('./market-scan-cursor');
@@ -385,6 +386,54 @@ test('Yahoo 200 pages are accepted only on the official search results route', (
     false
   );
 });
+
+test('Yahoo semantic results route accepts opensearch only with verified auction cards', () => {
+  assert.equal(
+    isYahooAuctionResultsPageWithCards_(
+      'https://auctions.yahoo.co.jp/opensearch?p=Kiton',
+      'Yahoo!オークション',
+      3
+    ),
+    true
+  );
+
+  assert.equal(
+    isYahooAuctionResultsPageWithCards_(
+      'https://auctions.yahoo.co.jp/opensearch?p=Kiton',
+      'Yahoo!オークション',
+      0
+    ),
+    false
+  );
+
+  assert.equal(
+    isYahooAuctionResultsPageWithCards_(
+      'https://example.com/opensearch?p=Kiton',
+      'Yahoo!オークション',
+      3
+    ),
+    false
+  );
+
+  assert.equal(
+    isYahooAuctionResultsPageWithCards_(
+      'https://auctions.yahoo.co.jp/other?p=Kiton',
+      'Yahoo!オークション',
+      3
+    ),
+    false
+  );
+
+  assert.equal(
+    isYahooAuctionResultsPageWithCards_(
+      'https://auctions.yahoo.co.jp/opensearch?p=Kiton',
+      'Yahoo! JAPAN',
+      3
+    ),
+    false
+  );
+});
+
 
 test('Yahoo outage circuit opens only at the configured consecutive failure threshold', () => {
   assert.equal(shouldOpenYahooSearchCircuit_(1, 3), false);
