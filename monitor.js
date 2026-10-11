@@ -3584,6 +3584,14 @@ async function main() {
         })
       );
 
+      console.log(
+        'MONITOR_HOT_PRIORITY_CAPABILITY:',
+        JSON.stringify({
+          enabled: HOT_SCHEDULER_MODE,
+          version: String(capability.hotPriorityVersion || '')
+        })
+      );
+
       if (
         HOT_SCHEDULER_MODE &&
         capability.hotPriorityVersion !== 'HOT_PRIORITY_META_V1_20261012'
