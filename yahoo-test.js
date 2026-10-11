@@ -17,6 +17,7 @@ const {
   runConditionsIndependently_,
   shouldAcceptYahoo404Search_,
   isYahooSearchResultsPage_,
+  isYahooAuctionResultsPageWithCards_,
   shouldOpenYahooSearchCircuit_,
   areAllYahooSearchResultsGlobalFailures_
 } = require('./market-scan-cursor');
@@ -462,6 +463,22 @@ async function getYahooConfigs() {
 // 既存商品の詳細追跡は止めない。
 // ============================================================
 
+async function countYahooResultCards_(page) {
+  return page.evaluate(() => {
+    const cards = new Set();
+
+    for (const link of document.querySelectorAll('a[href*="/jp/auction/"]')) {
+      const card = link.closest('li');
+      if (card) {
+        cards.add(card);
+      }
+    }
+
+    return cards.size;
+  });
+}
+
+
 async function collectYahooResultDomDiagnostic_(page) {
   return page.evaluate(() => {
     const auctionLinks = Array.from(
@@ -644,7 +661,7 @@ async function scanYahooSearchImpl_(
         // A cardless 404 remains a failure, so the scan cursor is not advanced.
         everyAttemptWasSuccessfulEmptyPage = false;
 
-        const count = await page.locator('li.Product').count();
+        const count = await countYahooResultCards_(page);
         let responseUrl = '';
         let title = '';
 
@@ -662,12 +679,21 @@ async function scanYahooSearchImpl_(
           title = '';
         }
 
-        const acceptedAsSearchResults = shouldAcceptYahoo404Search_(
-          status,
-          responseUrl,
-          title,
-          count
-        );
+        const acceptedAsSearchResults =
+          shouldAcceptYahoo404Search_(
+            status,
+            responseUrl,
+            title,
+            count
+          ) ||
+          (
+            Number(status) === 404 &&
+            isYahooAuctionResultsPageWithCards_(
+              responseUrl,
+              title,
+              count
+            )
+          );
 
         if (acceptedAsSearchResults) {
           console.warn(
@@ -770,10 +796,19 @@ async function scanYahooSearchImpl_(
           title = '';
         }
 
-        const expectedResultsPage = isYahooSearchResultsPage_(
-          responseUrl,
-          title
-        );
+        await page.waitForTimeout(3000);
+
+        const count = await countYahooResultCards_(page);
+        const expectedResultsPage =
+          isYahooSearchResultsPage_(
+            responseUrl,
+            title
+          ) ||
+          isYahooAuctionResultsPageWithCards_(
+            responseUrl,
+            title,
+            count
+          );
 
         if (!expectedResultsPage) {
           everyAttemptWasSuccessfulEmptyPage = false;
@@ -807,8 +842,7 @@ async function scanYahooSearchImpl_(
             }
 
             try {
-              diagnostic.productCardCount =
-                await page.locator('li.Product').count();
+              diagnostic.productCardCount = count;
             } catch (error) {
               diagnostic.productCardCount = null;
             }
@@ -836,10 +870,6 @@ async function scanYahooSearchImpl_(
           }
         } else {
           everyFailedAttemptWasGlobal = false;
-
-          await page.waitForTimeout(3000);
-
-          const count = await page.locator('li.Product').count();
 
           console.log(
             '商品カード数:',
@@ -961,8 +991,14 @@ async function scanYahooSearchImpl_(
 
         const cards =
           Array.from(
-            document.querySelectorAll(
-              'li.Product'
+            new Set(
+              Array.from(
+                document.querySelectorAll(
+                  'a[href*="/jp/auction/"]'
+                )
+              )
+                .map(anchor => anchor.closest('li'))
+                .filter(Boolean)
             )
           ).slice(0, MAX_SEARCH_ITEMS);
 
