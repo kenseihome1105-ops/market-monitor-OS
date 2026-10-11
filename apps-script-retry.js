@@ -1,5 +1,43 @@
 'use strict';
 
+const APPS_SCRIPT_RETRY_JITTER_MAX_MS = 5000;
+
+function stableHash32_(value) {
+  const text = String(value || '');
+  let hash = 2166136261;
+
+  for (let index = 0; index < text.length; index++) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+function appsScriptRetryDelayMs_(baseDelayMs, identity, attempt) {
+  const numericBase = Number(baseDelayMs);
+  const base = Number.isFinite(numericBase)
+    ? Math.max(0, Math.trunc(numericBase))
+    : 0;
+  const currentAttempt = Number(attempt);
+
+  if (
+    base === 0 ||
+    !Number.isInteger(currentAttempt) ||
+    currentAttempt < 1
+  ) {
+    return base;
+  }
+
+  const jitter =
+    stableHash32_(
+      `${String(identity || '')}|${currentAttempt}`
+    ) %
+    (APPS_SCRIPT_RETRY_JITTER_MAX_MS + 1);
+
+  return base + jitter;
+}
+
 function shouldRetryAppsScriptResult_(result, attempt, maxAttempts) {
   const currentAttempt = Number(attempt);
   const maximumAttempts = Number(maxAttempts);
@@ -24,5 +62,6 @@ function shouldRetryAppsScriptResult_(result, attempt, maxAttempts) {
 }
 
 module.exports = {
-  shouldRetryAppsScriptResult_
+  shouldRetryAppsScriptResult_,
+  appsScriptRetryDelayMs_
 };

@@ -13,7 +13,10 @@ const {
   selectCursorBatch_,
   mergeUniqueItemsById_
 } = require('./market-scan-cursor');
-const { shouldRetryAppsScriptResult_ } = require('./apps-script-retry');
+const {
+  shouldRetryAppsScriptResult_,
+  appsScriptRetryDelayMs_
+} = require('./apps-script-retry');
 const {
   buildMarketCompsCacheKey_,
   getOrLoadMarketComps_
@@ -210,6 +213,20 @@ async function postAppsScriptJsonWithRetry_(
   let lastError =
     null;
 
+  const retryIdentity =
+    [
+      process.env.GITHUB_WORKFLOW || 'local',
+      process.env.GITHUB_RUN_ID || '',
+      process.env.GITHUB_JOB || '',
+      process.env.MONITOR_SHARD_INDEX || '',
+      String(label || ''),
+      String(
+        payload &&
+        payload.action ||
+        ''
+      )
+    ].join('|');
+
 
   for (
     let attempt = 1;
@@ -217,12 +234,19 @@ async function postAppsScriptJsonWithRetry_(
     attempt++
   ) {
 
-    const delayMs =
+    const baseDelayMs =
       Number(
         APPS_SCRIPT_RETRY_DELAYS_MS[
           attempt - 1
         ] ||
         0
+      );
+
+    const delayMs =
+      appsScriptRetryDelayMs_(
+        baseDelayMs,
+        retryIdentity,
+        attempt
       );
 
 

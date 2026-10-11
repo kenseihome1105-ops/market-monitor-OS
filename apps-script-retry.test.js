@@ -2,7 +2,10 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { shouldRetryAppsScriptResult_ } = require('./apps-script-retry');
+const {
+  shouldRetryAppsScriptResult_,
+  appsScriptRetryDelayMs_
+} = require('./apps-script-retry');
 
 test('retries a busy response while attempts remain', () => {
   assert.equal(
@@ -42,4 +45,37 @@ test('rejects invalid attempt ranges', () => {
     shouldRetryAppsScriptResult_({ ok: false, error: 'busy' }, 1, 0),
     false
   );
+});
+
+test('retry desync preserves zero-delay first attempt', () => {
+  assert.equal(
+    appsScriptRetryDelayMs_(0, 'workflow|run|shard-0', 1),
+    0
+  );
+});
+
+test('retry desync is deterministic and bounded', () => {
+  const base = 6000;
+  const identity = 'Market Monitor Test|123|monitor|0|Config|getConfig';
+  const first = appsScriptRetryDelayMs_(base, identity, 3);
+  const second = appsScriptRetryDelayMs_(base, identity, 3);
+
+  assert.equal(first, second);
+  assert.ok(first >= base);
+  assert.ok(first <= base + 5000);
+});
+
+test('different worker identities desynchronize retry waits', () => {
+  const shard0 = appsScriptRetryDelayMs_(
+    2500,
+    'Market Monitor Test|123|monitor|0|Config|getConfig',
+    2
+  );
+  const shard1 = appsScriptRetryDelayMs_(
+    2500,
+    'Market Monitor Test|123|monitor|1|Config|getConfig',
+    2
+  );
+
+  assert.notEqual(shard0, shard1);
 });
