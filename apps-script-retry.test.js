@@ -18,6 +18,26 @@ test('retries a busy response while attempts remain', () => {
   );
 });
 
+test('retries transient Spreadsheet service failures while attempts remain', () => {
+  const result = {
+    ok: false,
+    error: 'Service Spreadsheets failed while accessing document with id example.'
+  };
+
+  assert.equal(
+    shouldRetryAppsScriptResult_(result, 1, 5),
+    true
+  );
+  assert.equal(
+    shouldRetryAppsScriptResult_(result, 4, 5),
+    true
+  );
+  assert.equal(
+    shouldRetryAppsScriptResult_(result, 5, 5),
+    false
+  );
+});
+
 test('does not retry success or permanent Apps Script errors', () => {
   assert.equal(
     shouldRetryAppsScriptResult_({ ok: true }, 1, 5),
