@@ -17,6 +17,8 @@
 // 現行出品の仕入れ側（Mercari / Yahoo）は別工程で同じDB商品へ結合する。
 // ============================================================
 
+const { appsScriptRetryDelayMs_ } = require('./apps-script-retry');
+
 const INGEST_URL = process.env.MARKET_INGEST_URL;
 const INGEST_SECRET = process.env.MARKET_INGEST_SECRET;
 
@@ -146,13 +148,27 @@ function looksLikeAppsScriptHtml_(text, contentType) {
 async function postAppsScriptJson_(payload, label) {
   let lastError = null;
 
+  const retryIdentity = [
+    process.env.GITHUB_WORKFLOW || 'local',
+    process.env.GITHUB_RUN_ID || '',
+    process.env.GITHUB_JOB || '',
+    String(label || ''),
+    String(payload && payload.action || '')
+  ].join('|');
+
   for (
     let attempt = 1;
     attempt <= APPS_SCRIPT_MAX_ATTEMPTS;
     attempt++
   ) {
-    const delayMs = Number(
+    const baseDelayMs = Number(
       APPS_SCRIPT_RETRY_DELAYS_MS[attempt - 1] || 0
+    );
+
+    const delayMs = appsScriptRetryDelayMs_(
+      baseDelayMs,
+      retryIdentity,
+      attempt
     );
 
     if (delayMs > 0) {
