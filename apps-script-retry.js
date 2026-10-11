@@ -48,11 +48,19 @@ function shouldRetryAppsScriptResult_(result, attempt, maxAttempts) {
     errorText === 'busy' ||
     errorText.endsWith(': busy');
 
+  const retryableSpreadsheetService =
+    errorText.includes(
+      'Service Spreadsheets failed while accessing document'
+    );
+
   return Boolean(
     result &&
     typeof result === 'object' &&
     result.ok !== true &&
-    retryableBusy &&
+    (
+      retryableBusy ||
+      retryableSpreadsheetService
+    ) &&
     Number.isInteger(currentAttempt) &&
     currentAttempt >= 1 &&
     Number.isInteger(maximumAttempts) &&
