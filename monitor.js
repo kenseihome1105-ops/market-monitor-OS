@@ -4,7 +4,15 @@ const {
   recordConditionAttempt_,
   buildConditionAttemptBatchPayload_
 } = require('./condition-attempt-batch');
+const {
+  createMarketScanCursorBatch_,
+  recordMarketScanCursorAck_,
+  buildMarketScanCursorBatchPayload_
+} = require('./market-scan-cursor-batch');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
+const CURSOR_ACK_BATCH_MODE =
+  process.env.MONITOR_CURSOR_ACK_BATCH_MODE === 'true';
+const CURSOR_ACK_BATCH_FLUSH_SIZE = 20;
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
@@ -1367,6 +1375,63 @@ async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId,
     },
     `Scan cursor ${conditionId}`
   );
+}
+
+
+async function flushMarketScanCursorBatch_(batch, reason = 'threshold') {
+  if (!(batch instanceof Map)) {
+    throw new Error('market scan cursor batch must be a Map');
+  }
+
+  if (batch.size === 0) {
+    return {
+      ok: true,
+      action: 'ackMarketScanCursorBatch',
+      committed: 0
+    };
+  }
+
+  const payload =
+    buildMarketScanCursorBatchPayload_(
+      batch,
+      INGEST_SECRET
+    );
+  const conditionIds =
+    payload.cursors.map(
+      cursor => cursor.conditionId
+    );
+  const startedAt = Date.now();
+
+  const result =
+    await postAppsScriptJson(
+      payload,
+      `Scan cursor batch ${reason}`
+    );
+
+  if (
+    result.action !== 'ackMarketScanCursorBatch' ||
+    Number(result.committed) !== conditionIds.length
+  ) {
+    throw new Error(
+      'Scan cursor batch response is invalid'
+    );
+  }
+
+  conditionIds.forEach(
+    conditionId => batch.delete(conditionId)
+  );
+
+  console.log(
+    '[TIMING] Scan cursor batch:',
+    JSON.stringify({
+      reason,
+      count: conditionIds.length,
+      postCount: 1,
+      elapsedMs: Date.now() - startedAt
+    })
+  );
+
+  return result;
 }
 
 
@@ -3172,7 +3237,8 @@ async function runYahooMarketCompsForInsertedItems_(
 async function scanMercariCondition(
   page,
   config,
-  marketCompsCache
+  marketCompsCache,
+  cursorAckBatch
 ) {
 
   console.log(
@@ -3329,16 +3395,40 @@ async function scanMercariCondition(
       config.conditionId
     );
 
-  await acknowledgeMarketScanCursor_(
-    config.conditionId,
-    batch.nextOffset === null
+  const cursorAck = {
+    conditionId: config.conditionId,
+    market: MARKET,
+    nextOffset: batch.nextOffset === null
       ? defaultScanOffset_(MARKET)
       : batch.nextOffset,
-    batch.items.length
+    lastItemId: batch.items.length
       ? batch.items[batch.items.length - 1]
       : '',
-    headGap.state
-  );
+    headState: headGap.state
+  };
+
+  if (
+    FAST_MODE &&
+    CURSOR_ACK_BATCH_MODE
+  ) {
+    if (
+      !recordMarketScanCursorAck_(
+        cursorAckBatch,
+        cursorAck
+      )
+    ) {
+      throw new Error(
+        `Scan cursor batch input invalid: ${config.conditionId}`
+      );
+    }
+  } else {
+    await acknowledgeMarketScanCursor_(
+      cursorAck.conditionId,
+      cursorAck.nextOffset,
+      cursorAck.lastItemId,
+      cursorAck.headState
+    );
+  }
 
 
   console.log(
@@ -3483,6 +3573,15 @@ async function main() {
       if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') {
         throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
       }
+
+      if (
+        CURSOR_ACK_BATCH_MODE &&
+        capability.cursorAckBatchVersion !== 'CURSOR_ACK_BATCH_V1_20261012'
+      ) {
+        throw new Error(
+          'Deploy CURSOR_ACK_BATCH_V1_20261012 before enabling cursor ACK batching'
+        );
+      }
     } catch (error) {
       const capabilityErrorMessage =
         error && error.message
@@ -3579,6 +3678,10 @@ async function main() {
 
   const budgetStartedAt = Date.now();
   let deferredConditions = 0;
+  let cursorCommittedConditions = 0;
+  let cursorDeferredConditions = 0;
+  const cursorAckBatch =
+    createMarketScanCursorBatch_();
 
 
   if (
@@ -3727,11 +3830,53 @@ async function main() {
         await scanMercariCondition(
           page,
           config,
-          marketCompsCache
+          marketCompsCache,
+          cursorAckBatch
         );
 
 
         succeededConditions++;
+
+        if (
+          FAST_MODE &&
+          CURSOR_ACK_BATCH_MODE &&
+          cursorAckBatch.size >= CURSOR_ACK_BATCH_FLUSH_SIZE
+        ) {
+          try {
+            const cursorBatchResult =
+              await flushMarketScanCursorBatch_(
+                cursorAckBatch,
+                'threshold'
+              );
+            cursorCommittedConditions +=
+              Number(cursorBatchResult.committed || 0);
+          } catch (error) {
+            const cursorBatchErrorMessage =
+              error && error.message
+                ? String(error.message)
+                : String(error);
+            const transientCursorBatchFailure =
+              cursorBatchErrorMessage.includes('busy') ||
+              cursorBatchErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
+              /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(cursorBatchErrorMessage) ||
+              cursorBatchErrorMessage.includes('応答がJSONではありません') ||
+              cursorBatchErrorMessage.includes('通信失敗:');
+
+            if (!transientCursorBatchFailure) {
+              throw error;
+            }
+
+            cursorDeferredConditions += cursorAckBatch.size;
+            console.warn(
+              '⚠️ Scan cursor batch一時障害。未commit分は次回再走査:',
+              JSON.stringify({
+                pending: cursorAckBatch.size,
+                error: cursorBatchErrorMessage
+              })
+            );
+            break;
+          }
+        }
 
       } catch (error) {
 
@@ -3807,6 +3952,47 @@ async function main() {
         800
       );
 
+    }
+
+
+    if (
+      FAST_MODE &&
+      CURSOR_ACK_BATCH_MODE &&
+      cursorAckBatch.size > 0
+    ) {
+      try {
+        const cursorBatchResult =
+          await flushMarketScanCursorBatch_(
+            cursorAckBatch,
+            'final'
+          );
+        cursorCommittedConditions +=
+          Number(cursorBatchResult.committed || 0);
+      } catch (error) {
+        const cursorBatchErrorMessage =
+          error && error.message
+            ? String(error.message)
+            : String(error);
+        const transientCursorBatchFailure =
+          cursorBatchErrorMessage.includes('busy') ||
+          cursorBatchErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
+          /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(cursorBatchErrorMessage) ||
+          cursorBatchErrorMessage.includes('応答がJSONではありません') ||
+          cursorBatchErrorMessage.includes('通信失敗:');
+
+        if (!transientCursorBatchFailure) {
+          throw error;
+        }
+
+        cursorDeferredConditions += cursorAckBatch.size;
+        console.warn(
+          '⚠️ Final scan cursor batch一時障害。未commit分は次回再走査:',
+          JSON.stringify({
+            pending: cursorAckBatch.size,
+            error: cursorBatchErrorMessage
+          })
+        );
+      }
     }
 
 
@@ -3943,7 +4129,11 @@ async function main() {
       succeeded: succeededConditions,
       failed: fatalFailedConditions.length,
       preservedEmpty: preservedEmptyConditions.length,
-      deferred: deferredConditions
+      deferred: deferredConditions,
+      cursorAckBatchMode: CURSOR_ACK_BATCH_MODE,
+      cursorCommitted: cursorCommittedConditions,
+      cursorDeferred: cursorDeferredConditions,
+      cursorPending: cursorAckBatch.size
     }));
     if (
       succeededConditions === 0
