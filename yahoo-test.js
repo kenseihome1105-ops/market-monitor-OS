@@ -9,7 +9,10 @@ const {
   recordMarketScanCursorAck_,
   buildMarketScanCursorBatchPayload_
 } = require('./market-scan-cursor-batch');
-const { appsScriptRetryDelayMs_ } = require('./apps-script-retry');
+const {
+  shouldRetryAppsScriptResult_,
+  appsScriptRetryDelayMs_
+} = require('./apps-script-retry');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const CURSOR_ACK_BATCH_MODE =
   process.env.MONITOR_CURSOR_ACK_BATCH_MODE === 'true';
@@ -62,7 +65,7 @@ function sleep(ms) {
 // 監視全体を即終了させず、新しいPOSTで最大5回まで再試行する。
 //
 // ※ unauthorized / invalid market 等の通常のJSONエラーは再試行しない。
-//    Apps Scriptのwrite lock競合(busy)のみ一時エラーとして再試行する。
+//    busy / ScriptLock busy / Spreadsheet service failure のみ一時エラーとして再試行する。
 // ============================================================
 
 const APPS_SCRIPT_MAX_ATTEMPTS = 5;
@@ -251,11 +254,14 @@ async function postAppsScriptJsonWithRetry_(payload, label) {
       lastError = new Error(`${label}側エラー: ${errorText}`);
 
       if (
-        result.error === 'busy' &&
-        attempt < APPS_SCRIPT_MAX_ATTEMPTS
+        shouldRetryAppsScriptResult_(
+          result,
+          attempt,
+          APPS_SCRIPT_MAX_ATTEMPTS
+        )
       ) {
         console.warn(
-          `[${label}] Apps Scriptのwrite lock競合を一時エラーとして再試行します`
+          `[${label}] Apps Script一時エラーとして再試行します`
         );
         continue;
       }
