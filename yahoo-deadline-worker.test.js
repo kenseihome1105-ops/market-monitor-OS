@@ -3,6 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  processDeadlineBatch_,
   isTransientTrackingAttemptError_
 } = require('./yahoo-deadline-worker');
 
