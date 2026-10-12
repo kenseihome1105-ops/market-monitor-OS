@@ -13,6 +13,7 @@ const {
   runConditionsIndependently_,
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
+  shouldResetYahooCursorFromShortHead_,
   nextYahooScanOffset_,
   buildYahooScanUrl_,
   shouldAcceptYahoo404Search_,
@@ -145,6 +146,25 @@ test('Yahoo rebases to the prior item ID after rows disappear before it', () => 
   const result = rebaseYahooScanOffset_(31, 'item-8', 21, priorWindowIds);
 
   assert.deepEqual(result, { offset: 29, mode: 'REANCHORED' });
+});
+
+test('Yahoo resets a saved continuation cursor when the head already proves end-of-results', () => {
+  assert.equal(
+    shouldResetYahooCursorFromShortHead_({ ok: true, rawRowsRead: 3 }, 43, 10),
+    true
+  );
+  assert.equal(
+    shouldResetYahooCursorFromShortHead_({ ok: true, rawRowsRead: 10 }, 43, 10),
+    false
+  );
+  assert.equal(
+    shouldResetYahooCursorFromShortHead_({ ok: false, rawRowsRead: 3 }, 43, 10),
+    false
+  );
+  assert.equal(
+    shouldResetYahooCursorFromShortHead_({ ok: true, rawRowsRead: 3 }, 1, 10),
+    false
+  );
 });
 
 test('Yahoo treats an empty continuation page as end-of-results after successful prior pages', () => {
