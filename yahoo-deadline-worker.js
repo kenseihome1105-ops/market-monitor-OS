@@ -34,6 +34,22 @@ async function processDeadlineBatch_(targets, scan, ingest, notify) {
   return { updated: confirmedIds.length, failedDetails: failures };
 }
 
+function isTransientTrackingAttemptError_(error) {
+  const message =
+    error && error.message
+      ? String(error.message)
+      : String(error);
+
+  return (
+    message.includes('busy') ||
+    message.includes('ScriptLock busy') ||
+    message.includes('Service Spreadsheets failed while accessing document') ||
+    /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(message) ||
+    message.includes('応答がJSONではありません') ||
+    message.includes('通信失敗:')
+  );
+}
+
 async function main() {
   const capability = await postAppsScriptJson_({ secret, action: 'getMonitorCapabilities' }, 'Capabilities');
   if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 first');
@@ -41,13 +57,22 @@ async function main() {
   const targets = prioritizeYahooTargets_(response.targets);
   const browser = await chromium.launch({ headless: true });
   const start = Date.now();
-  const summary = { total: targets.length, attempted: 0, updated: 0, failedDetails: [], deferred: 0 };
+  const summary = {
+    total: targets.length,
+    attempted: 0,
+    updated: 0,
+    failedDetails: [],
+    deferred: 0,
+    trackingAttemptDeferred: 0
+  };
+  const attemptedItemIds = [];
   try {
     const context = await browser.newContext({ locale: 'ja-JP', timezoneId: 'Asia/Tokyo' });
     for (let i = 0; i < targets.length; i += 10) {
       if (Date.now() - start > 3 * 60000) break;
       const chunk = targets.slice(i, i + 10);
-      await postAppsScriptJson_({ secret, action: 'ackYahooTrackingAttempt', itemIds: chunk.map(t => t.itemId) }, 'Tracking attempt');
+      const chunkItemIds = chunk.map(t => t.itemId);
+      attemptedItemIds.push(...chunkItemIds);
       summary.attempted += chunk.length;
       const result = await processDeadlineBatch_(chunk, async target => {
         const url = new URL(target.url);
@@ -62,10 +87,45 @@ async function main() {
       summary.failedDetails.push(...result.failedDetails);
     }
   } finally { await browser.close(); }
+
+  if (attemptedItemIds.length) {
+    try {
+      await postAppsScriptJson_(
+        {
+          secret,
+          action: 'ackYahooTrackingAttempt',
+          itemIds: Array.from(new Set(attemptedItemIds))
+        },
+        'Tracking attempt'
+      );
+    } catch (error) {
+      if (!isTransientTrackingAttemptError_(error)) {
+        throw error;
+      }
+
+      summary.trackingAttemptDeferred =
+        Array.from(new Set(attemptedItemIds)).length;
+
+      console.warn(
+        '⚠️ Tracking attempt記録のみ一時障害。Yahoo詳細確認/通知は完了済みのため次回へ繰越:',
+        JSON.stringify({
+          count: summary.trackingAttemptDeferred,
+          error: error && error.message
+            ? error.message
+            : String(error)
+        })
+      );
+    }
+  }
+
   summary.deferred = targets.length - summary.attempted;
   console.log('YAHOO_DEADLINE_SUMMARY:', JSON.stringify(summary));
   if (summary.failedDetails.length) console.warn('Some detail reads failed/ended; excluded from notifications and retried if still active.');
 }
 
 if (require.main === module) main().catch(error => { console.error('YAHOO_DEADLINE_ERROR:', error.message); process.exitCode = 1; });
-module.exports = { main, processDeadlineBatch_ };
+module.exports = {
+  main,
+  processDeadlineBatch_,
+  isTransientTrackingAttemptError_
+};
