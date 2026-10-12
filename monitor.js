@@ -16,6 +16,7 @@ const CURSOR_ACK_BATCH_FLUSH_SIZE = 20;
 const HOT_SCHEDULER_MODE =
   process.env.MONITOR_HOT_SCHEDULER_MODE === 'true';
 const { chromium } = require('playwright');
+const { isTransientMercariNavigationError_ } = require('./monitor-transient');
 const {
   defaultScanOffset_,
   enforceMercariActiveSearchUrl_,
@@ -3936,10 +3937,18 @@ async function main() {
             errorMessage.includes('通信失敗:')
           );
 
-        if (appsScriptTransientDeferred) {
+        const navigationTransientDeferred =
+          isTransientMercariNavigationError_(errorMessage);
+
+        if (
+          appsScriptTransientDeferred ||
+          navigationTransientDeferred
+        ) {
           deferredConditions++;
           console.warn(
-            '⚠️ Apps Script一時障害。カーソルを進めず次回再走査へ:',
+            navigationTransientDeferred
+              ? '⚠️ Mercari一時ナビゲーション障害。カーソルを進めず次回再走査へ:'
+              : '⚠️ Apps Script一時障害。カーソルを進めず次回再走査へ:',
             JSON.stringify({
               conditionId: config.conditionId || 'UNKNOWN',
               searchName: config.searchName || '',
