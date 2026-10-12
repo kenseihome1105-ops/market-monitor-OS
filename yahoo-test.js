@@ -4,8 +4,16 @@ const {
   recordConditionAttempt_,
   buildConditionAttemptBatchPayload_
 } = require('./condition-attempt-batch');
+const {
+  createMarketScanCursorBatch_,
+  recordMarketScanCursorAck_,
+  buildMarketScanCursorBatchPayload_
+} = require('./market-scan-cursor-batch');
 const { appsScriptRetryDelayMs_ } = require('./apps-script-retry');
 const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
+const CURSOR_ACK_BATCH_MODE =
+  process.env.MONITOR_CURSOR_ACK_BATCH_MODE === 'true';
+const CURSOR_ACK_BATCH_FLUSH_SIZE = 20;
 const { chromium } = require('playwright');
 const {
   defaultScanOffset_,
@@ -303,6 +311,79 @@ async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId)
       lastItemId: String(lastItemId || '')
     },
     `Scan cursor ${conditionId}`
+  );
+}
+
+
+async function flushMarketScanCursorBatch_(batch, reason = 'threshold') {
+  if (!(batch instanceof Map)) {
+    throw new Error('market scan cursor batch must be a Map');
+  }
+
+  if (batch.size === 0) {
+    return {
+      ok: true,
+      action: 'ackMarketScanCursorBatch',
+      committed: 0
+    };
+  }
+
+  const payload =
+    buildMarketScanCursorBatchPayload_(
+      batch,
+      MARKET_INGEST_SECRET
+    );
+  const conditionIds =
+    payload.cursors.map(
+      cursor => cursor.conditionId
+    );
+  const startedAt = Date.now();
+
+  const result =
+    await postAppsScriptJson_(
+      payload,
+      `Scan cursor batch ${reason}`
+    );
+
+  if (
+    result.action !== 'ackMarketScanCursorBatch' ||
+    Number(result.committed) !== conditionIds.length
+  ) {
+    throw new Error(
+      'Scan cursor batch response is invalid'
+    );
+  }
+
+  conditionIds.forEach(
+    conditionId => batch.delete(conditionId)
+  );
+
+  console.log(
+    '[TIMING] Yahoo scan cursor batch:',
+    JSON.stringify({
+      reason,
+      count: conditionIds.length,
+      postCount: 1,
+      elapsedMs: Date.now() - startedAt
+    })
+  );
+
+  return result;
+}
+
+
+function isTransientCursorBatchError_(error) {
+  const message =
+    error && error.message
+      ? String(error.message)
+      : String(error);
+
+  return (
+    message.includes('busy') ||
+    message.includes('Service Spreadsheets failed while accessing document') ||
+    /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(message) ||
+    message.includes('応答がJSONではありません') ||
+    message.includes('通信失敗:')
   );
 }
 
@@ -2383,8 +2464,36 @@ async function main() {
   // ========================================================
 
   if (FAST_MODE) {
-    const capability = await postAppsScriptJson_({ secret: MARKET_INGEST_SECRET, action: 'getMonitorCapabilities' }, 'Capabilities');
-    if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring');
+    const capability = await postAppsScriptJson_(
+      {
+        secret: MARKET_INGEST_SECRET,
+        action: 'getMonitorCapabilities'
+      },
+      'Capabilities'
+    );
+
+    if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') {
+      throw new Error(
+        'Deploy MONITOR_PRIORITY_V1_20261003 before fast monitoring'
+      );
+    }
+
+    console.log(
+      'YAHOO_CURSOR_ACK_CAPABILITY:',
+      JSON.stringify({
+        enabled: CURSOR_ACK_BATCH_MODE,
+        version: String(capability.cursorAckBatchVersion || '')
+      })
+    );
+
+    if (
+      CURSOR_ACK_BATCH_MODE &&
+      capability.cursorAckBatchVersion !== 'CURSOR_ACK_BATCH_V1_20261012'
+    ) {
+      throw new Error(
+        'Deploy CURSOR_ACK_BATCH_V1_20261012 before enabling Yahoo cursor ACK batching'
+      );
+    }
   }
   let rawConfigs;
 
@@ -2498,6 +2607,12 @@ async function main() {
     // shard終了時に1回のPOSTへまとめる。
     const conditionAttemptBatch =
       createConditionAttemptBatch_();
+
+    const cursorAckBatch =
+      createMarketScanCursorBatch_();
+    let cursorCommittedConditions = 0;
+    let cursorDeferredConditions = 0;
+    let cursorBatchFlushDeferred = false;
 
 
     const conditionFailures = await runConditionsIndependently_(
@@ -2697,11 +2812,66 @@ async function main() {
           scanOffset,
           coverageResult.rawRowsRead
         );
-        await acknowledgeMarketScanCursor_(
-          config.conditionId,
-          nextOffset,
-          coverageResult.lastRawItemId
-        );
+
+        if (
+          FAST_MODE &&
+          CURSOR_ACK_BATCH_MODE
+        ) {
+          const recorded =
+            recordMarketScanCursorAck_(
+              cursorAckBatch,
+              {
+                conditionId: config.conditionId,
+                market: MARKET,
+                nextOffset,
+                lastItemId: coverageResult.lastRawItemId
+              }
+            );
+
+          if (!recorded) {
+            throw new Error(
+              'Yahoo scan cursor batch state is invalid'
+            );
+          }
+
+          if (
+            !cursorBatchFlushDeferred &&
+            cursorAckBatch.size >= CURSOR_ACK_BATCH_FLUSH_SIZE
+          ) {
+            try {
+              const cursorBatchResult =
+                await flushMarketScanCursorBatch_(
+                  cursorAckBatch,
+                  'threshold'
+                );
+
+              cursorCommittedConditions +=
+                Number(cursorBatchResult.committed || 0);
+            } catch (error) {
+              if (!isTransientCursorBatchError_(error)) {
+                throw error;
+              }
+
+              cursorBatchFlushDeferred = true;
+              console.warn(
+                '⚠️ Yahoo scan cursor batch一時障害。pendingを保持してfinal flushで再試行:',
+                JSON.stringify({
+                  pending: cursorAckBatch.size,
+                  error: error && error.message
+                    ? String(error.message)
+                    : String(error)
+                })
+              );
+            }
+          }
+        } else {
+          await acknowledgeMarketScanCursor_(
+            config.conditionId,
+            nextOffset,
+            coverageResult.lastRawItemId
+          );
+          cursorCommittedConditions++;
+        }
       } else {
         // 取得に失敗した場合は保存済み位置を維持し、次回同じ位置から再試行する。
         console.warn(
@@ -2847,6 +3017,40 @@ async function main() {
 
     if (
       FAST_MODE &&
+      CURSOR_ACK_BATCH_MODE &&
+      cursorAckBatch.size > 0
+    ) {
+      try {
+        const cursorBatchResult =
+          await flushMarketScanCursorBatch_(
+            cursorAckBatch,
+            'final'
+          );
+
+        cursorCommittedConditions +=
+          Number(cursorBatchResult.committed || 0);
+      } catch (error) {
+        if (!isTransientCursorBatchError_(error)) {
+          throw error;
+        }
+
+        cursorDeferredConditions += cursorAckBatch.size;
+
+        console.warn(
+          '⚠️ Yahoo final scan cursor batch一時障害。未commit分は次回再走査:',
+          JSON.stringify({
+            pending: cursorAckBatch.size,
+            error: error && error.message
+              ? String(error.message)
+              : String(error)
+          })
+        );
+      }
+    }
+
+
+    if (
+      FAST_MODE &&
       conditionAttemptBatch.size > 0
     ) {
       const conditionAttemptBatchStartedAt = Date.now();
@@ -2975,6 +3179,10 @@ async function main() {
       failed: fatalConditionFailures.length,
       transientDeferred: transientDeferredFailures.length,
       deferred: deferredConditions,
+      cursorAckBatchMode: CURSOR_ACK_BATCH_MODE,
+      cursorCommitted: cursorCommittedConditions,
+      cursorDeferred: cursorDeferredConditions,
+      cursorPending: cursorAckBatch.size,
       searchCircuitOpen: yahooSearchCircuitOpen,
       deadlineTracking: FAST_MODE ? 'SEPARATE_WORKER' : 'INLINE'
     }));
