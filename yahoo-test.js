@@ -20,6 +20,7 @@ const {
   buildYahooScanUrl_,
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
+  shouldResetYahooCursorFromShortHead_,
   nextYahooScanOffset_,
   mergeUniqueItemsById_,
   runConditionsIndependently_,
@@ -2684,7 +2685,33 @@ async function main() {
       let lookbackResult = null;
 
       if (!circuitWasOpenAtConditionStart && storedScanOffset > defaultScanOffset_(MARKET)) {
-        if (storedLastItemId) {
+        if (
+          shouldResetYahooCursorFromShortHead_(
+            headResult,
+            storedScanOffset,
+            MAX_SEARCH_ITEMS
+          )
+        ) {
+          scanOffset = defaultScanOffset_(MARKET);
+          cursorMode = 'END_OF_RESULTS';
+          coverageResult = {
+            ok: true,
+            items: [],
+            rawRowsRead: 0,
+            rawItemIds: [],
+            lastRawItemId: '',
+            endOfResults: true
+          };
+
+          console.warn(
+            'Yahoo先頭ページが10件未満のため保存カーソルは結果終端を越えています。先頭へ戻します:',
+            JSON.stringify({
+              conditionId: config.conditionId,
+              storedOffset: storedScanOffset,
+              headRows: headResult.rawRowsRead
+            })
+          );
+        } else if (storedLastItemId) {
           const lookbackOffset = Math.max(
             defaultScanOffset_(MARKET),
             storedScanOffset - MAX_SEARCH_ITEMS
