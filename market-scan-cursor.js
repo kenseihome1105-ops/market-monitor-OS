@@ -234,6 +234,30 @@ function normalizeYahooContinuationResult_(headResult, lookbackResult, continuat
   };
 }
 
+function shouldResetYahooCursorFromShortHead_(
+  headResult,
+  storedScanOffset,
+  pageSize = MAX_SCAN_ITEMS
+) {
+  const stored = Number(storedScanOffset);
+  const size = Number(pageSize);
+  const rawRowsRead = Number(
+    headResult && headResult.rawRowsRead
+  );
+
+  return (
+    headResult &&
+    headResult.ok === true &&
+    Number.isInteger(stored) &&
+    stored > 1 &&
+    Number.isInteger(size) &&
+    size >= 1 &&
+    Number.isInteger(rawRowsRead) &&
+    rawRowsRead >= 0 &&
+    rawRowsRead < size
+  );
+}
+
 /** Advance Yahoo by raw result rows, independent of title/price filtering. */
 function nextYahooScanOffset_(currentOffset, rawRowsRead) {
   const current = Number(currentOffset);
@@ -376,6 +400,7 @@ module.exports = {
   runConditionsIndependently_,
   rebaseYahooScanOffset_,
   normalizeYahooContinuationResult_,
+  shouldResetYahooCursorFromShortHead_,
   nextYahooScanOffset_,
   buildYahooScanUrl_,
   shouldAcceptYahoo404Search_,
