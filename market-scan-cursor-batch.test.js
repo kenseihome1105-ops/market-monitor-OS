@@ -155,6 +155,44 @@ test('Yahoo cursor uses offset 1 minimum and cannot carry Mercari head state', (
   );
 });
 
+test('Yahoo cursor batch payload keeps one-based offsets and no head state', () => {
+  const batch = createMarketScanCursorBatch_();
+
+  assert.equal(
+    recordMarketScanCursorAck_(batch, {
+      conditionId: 'Y-02',
+      market: 'ヤフオク',
+      nextOffset: 11,
+      lastItemId: 'y200'
+    }),
+    true
+  );
+
+  assert.equal(
+    recordMarketScanCursorAck_(batch, {
+      conditionId: 'Y-01',
+      market: 'ヤフオク',
+      nextOffset: 1,
+      lastItemId: 'y100'
+    }),
+    true
+  );
+
+  const payload = buildMarketScanCursorBatchPayload_(batch, 'secret');
+
+  assert.equal(payload.action, 'ackMarketScanCursorBatch');
+  assert.deepEqual(
+    payload.cursors.map(item => item.conditionId),
+    ['Y-01', 'Y-02']
+  );
+  assert.equal(payload.cursors[0].market, 'ヤフオク');
+  assert.equal(payload.cursors[0].nextOffset, 1);
+  assert.equal(payload.cursors[0].headState, null);
+  assert.equal(payload.cursors[1].nextOffset, 11);
+  assert.equal(payload.cursors[1].lastItemId, 'y200');
+});
+
+
 test('fails closed instead of silently dropping cursors over the batch limit', () => {
   const batch = createMarketScanCursorBatch_();
 
