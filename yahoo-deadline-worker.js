@@ -22,19 +22,51 @@ async function processDeadlineBatch_(targets, scan, ingest, notify) {
     });
   }
   const confirmedIds = [];
+  const ingestDeferredIds = [];
+
   for (const [conditionId, items] of groups) {
-    const result = await ingest(items, conditionId);
-    if (!result || result.ok !== true) throw new Error('Yahoo fresh-price ingest failed; no notification');
-    confirmedIds.push(...items.map(i => i.itemId));
+    try {
+      const result = await ingest(items, conditionId);
+
+      if (!result || result.ok !== true) {
+        throw new Error('Yahoo fresh-price ingest failed; no notification');
+      }
+
+      confirmedIds.push(...items.map(i => i.itemId));
+    } catch (error) {
+      if (!isTransientDeadlineWriteError_(error)) {
+        throw error;
+      }
+
+      const deferredIds = items.map(i => i.itemId);
+      ingestDeferredIds.push(...deferredIds);
+
+      console.warn(
+        '⚠️ Yahoo fresh-price ingest一時障害。この条件だけ次回へ繰越:',
+        JSON.stringify({
+          conditionId,
+          itemIds: deferredIds,
+          error: error && error.message
+            ? error.message
+            : String(error)
+        })
+      );
+    }
   }
+
   if (confirmedIds.length) {
     const result = await notify(confirmedIds);
     if (result.notifications?.failed) throw new Error('LINE send failed');
   }
-  return { updated: confirmedIds.length, failedDetails: failures };
+
+  return {
+    updated: confirmedIds.length,
+    failedDetails: failures,
+    ingestDeferredIds
+  };
 }
 
-function isTransientTrackingAttemptError_(error) {
+function isTransientDeadlineWriteError_(error) {
   const message =
     error && error.message
       ? String(error.message)
@@ -50,6 +82,10 @@ function isTransientTrackingAttemptError_(error) {
   );
 }
 
+function isTransientTrackingAttemptError_(error) {
+  return isTransientDeadlineWriteError_(error);
+}
+
 async function main() {
   const capability = await postAppsScriptJson_({ secret, action: 'getMonitorCapabilities' }, 'Capabilities');
   if (capability.version !== 'MONITOR_PRIORITY_V1_20261003') throw new Error('Deploy MONITOR_PRIORITY_V1_20261003 first');
@@ -63,7 +99,9 @@ async function main() {
     updated: 0,
     failedDetails: [],
     deferred: 0,
-    trackingAttemptDeferred: 0
+    trackingAttemptDeferred: 0,
+    ingestDeferred: 0,
+    ingestDeferredItemIds: []
   };
   const attemptedItemIds = [];
   try {
@@ -85,6 +123,9 @@ async function main() {
       itemIds => postAppsScriptJson_({ secret, action: 'runProcurementNotifications', markets: ['ヤフオク'], itemIds }, 'Deadline notifications'));
       summary.updated += result.updated;
       summary.failedDetails.push(...result.failedDetails);
+      summary.ingestDeferredItemIds.push(
+        ...(result.ingestDeferredIds || [])
+      );
     }
   } finally { await browser.close(); }
 
@@ -118,14 +159,40 @@ async function main() {
     }
   }
 
+  summary.ingestDeferred =
+    Array.from(new Set(summary.ingestDeferredItemIds)).length;
+  summary.ingestDeferredItemIds =
+    Array.from(new Set(summary.ingestDeferredItemIds));
   summary.deferred = targets.length - summary.attempted;
+
   console.log('YAHOO_DEADLINE_SUMMARY:', JSON.stringify(summary));
-  if (summary.failedDetails.length) console.warn('Some detail reads failed/ended; excluded from notifications and retried if still active.');
+
+  if (summary.failedDetails.length) {
+    console.warn(
+      'Some detail reads failed/ended; excluded from notifications and retried if still active.'
+    );
+  }
+
+  if (summary.ingestDeferred > 0) {
+    console.warn(
+      'Some fresh-price ingests were transiently deferred; only successfully persisted items were eligible for notification.'
+    );
+  }
+
+  if (
+    summary.updated === 0 &&
+    summary.ingestDeferred > 0
+  ) {
+    throw new Error(
+      'All Yahoo deadline fresh-price ingests were transiently deferred; no fresh price was persisted'
+    );
+  }
 }
 
 if (require.main === module) main().catch(error => { console.error('YAHOO_DEADLINE_ERROR:', error.message); process.exitCode = 1; });
 module.exports = {
   main,
   processDeadlineBatch_,
+  isTransientDeadlineWriteError_,
   isTransientTrackingAttemptError_
 };
