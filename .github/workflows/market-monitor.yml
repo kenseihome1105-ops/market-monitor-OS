@@ -34,8 +34,8 @@ jobs:
           MONITOR_FAST_MODE: "true"
           MONITOR_CURSOR_ACK_BATCH_MODE: "true"
           MONITOR_HOT_SCHEDULER_MODE: "true"
-          # Canary: shard 0 only. Shards 1-3 remain on legacy single-condition ingest.
-          MONITOR_INGEST_BATCH_MODE: ${{ matrix.shard == 0 && 'true' || 'false' }}
+          # Full rollout after shard 0 canary PASS.
+          MONITOR_INGEST_BATCH_MODE: "true"
           MONITOR_SHARD_COUNT: "4"
           MONITOR_SHARD_INDEX: ${{ matrix.shard }}
         run: node monitor.js
