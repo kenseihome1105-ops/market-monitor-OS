@@ -13,6 +13,10 @@ const FAST_MODE = process.env.MONITOR_FAST_MODE === 'true';
 const CURSOR_ACK_BATCH_MODE =
   process.env.MONITOR_CURSOR_ACK_BATCH_MODE === 'true';
 const CURSOR_ACK_BATCH_FLUSH_SIZE = 20;
+const INGEST_BATCH_MODE =
+  FAST_MODE &&
+  process.env.MONITOR_INGEST_BATCH_MODE === 'true';
+const INGEST_BATCH_FLUSH_SIZE = 5;
 const HOT_SCHEDULER_MODE =
   process.env.MONITOR_HOT_SCHEDULER_MODE === 'true';
 const { chromium } = require('playwright');
@@ -302,6 +306,8 @@ async function postAppsScriptJsonWithRetry_(
                 ? 390000
                 : payload.action === 'upsertMarketCompsBatch'
                   ? 240000
+                  : payload.action === 'upsertMarketLedgerBatchV1'
+                    ? 120000
                   : payload.action === 'ackMarketScanCursor' ||
                     payload.action === 'ackConditionAttempt'
                     ? 30000
@@ -1363,6 +1369,38 @@ async function sendToAppsScript(
     `Ingest ${conditionId}`
   );
 
+}
+
+async function sendBatchToAppsScript(
+  groups
+) {
+  const normalizedGroups =
+    (Array.isArray(groups) ? groups : []).map(group => ({
+      conditionId:
+        String(group && group.conditionId || '').trim(),
+      items:
+        Array.isArray(group && group.items)
+          ? group.items
+          : []
+    }));
+
+  return postAppsScriptJson(
+    {
+      secret:
+        INGEST_SECRET,
+      action:
+        'upsertMarketLedgerBatchV1',
+      market:
+        MARKET,
+      includeMarketCompsTargets:
+        false,
+      includeTrackedYahoo:
+        false,
+      groups:
+        normalizedGroups
+    },
+    `Ingest batch ${normalizedGroups.length}`
+  );
 }
 
 async function acknowledgeMarketScanCursor_(conditionId, nextOffset, lastItemId, headState) {
@@ -3241,7 +3279,8 @@ async function scanMercariCondition(
   page,
   config,
   marketCompsCache,
-  cursorAckBatch
+  cursorAckBatch,
+  options = {}
 ) {
 
   console.log(
@@ -3392,12 +3431,6 @@ async function scanMercariCondition(
   }
 
 
-  const result =
-    await sendToAppsScript(
-      items,
-      config.conditionId
-    );
-
   const cursorAck = {
     conditionId: config.conditionId,
     market: MARKET,
@@ -3409,6 +3442,24 @@ async function scanMercariCondition(
       : '',
     headState: headGap.state
   };
+
+  if (
+    options &&
+    options.deferIngest === true
+  ) {
+    return {
+      deferredIngest: true,
+      conditionId: config.conditionId,
+      items,
+      cursorAck
+    };
+  }
+
+  const result =
+    await sendToAppsScript(
+      items,
+      config.conditionId
+    );
 
   if (
     FAST_MODE &&
@@ -3592,6 +3643,32 @@ async function main() {
           version: String(capability.hotPriorityVersion || '')
         })
       );
+
+      console.log(
+        'MONITOR_INGEST_BATCH_CAPABILITY:',
+        JSON.stringify({
+          enabled: INGEST_BATCH_MODE,
+          version: String(capability.marketIngestBatchVersion || '')
+        })
+      );
+
+      if (
+        INGEST_BATCH_MODE &&
+        !CURSOR_ACK_BATCH_MODE
+      ) {
+        throw new Error(
+          'Mercari ingest batching requires cursor ACK batching'
+        );
+      }
+
+      if (
+        INGEST_BATCH_MODE &&
+        capability.marketIngestBatchVersion !== 'MARKET_INGEST_BATCH_V1_20261016'
+      ) {
+        throw new Error(
+          'Deploy MARKET_INGEST_BATCH_V1_20261016 before enabling ingest batching'
+        );
+      }
 
       if (
         HOT_SCHEDULER_MODE &&
@@ -3829,6 +3906,188 @@ async function main() {
     const conditionAttemptBatch =
       createConditionAttemptBatch_();
 
+    const pendingIngestBatch = [];
+
+    const isTransientBatchError_ = errorMessage =>
+      String(errorMessage || '').includes('"error":"busy"') ||
+      /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(String(errorMessage || '')) ||
+      String(errorMessage || '').includes('応答がJSONではありません') ||
+      String(errorMessage || '').includes('通信失敗:');
+
+    const flushPendingIngestBatch_ =
+      async reason => {
+        if (!pendingIngestBatch.length) {
+          return { flushed: 0, stop: false };
+        }
+
+        const groups = pendingIngestBatch.splice(
+          0,
+          pendingIngestBatch.length
+        );
+
+        let batchResult;
+        try {
+          batchResult = await sendBatchToAppsScript(groups);
+        } catch (error) {
+          const errorMessage =
+            error && error.message
+              ? String(error.message)
+              : String(error);
+
+          if (isTransientBatchError_(errorMessage)) {
+            deferredConditions += groups.length;
+            console.warn(
+              '⚠️ Ingest batch一時障害。batch全条件のカーソルを進めず次回再走査へ:',
+              JSON.stringify({
+                reason,
+                conditionIds: groups.map(group => group.conditionId),
+                error: errorMessage
+              })
+            );
+            return { flushed: 0, deferred: groups.length, stop: false };
+          }
+
+          groups.forEach(group => {
+            failedConditions.push({
+              conditionId: group.conditionId || 'UNKNOWN',
+              searchName: '',
+              error: errorMessage
+            });
+          });
+          console.error(
+            '⚠️ Ingest batch非一時障害。batch全条件を失敗扱い:',
+            JSON.stringify({
+              reason,
+              conditionIds: groups.map(group => group.conditionId),
+              error: errorMessage
+            })
+          );
+          return { flushed: 0, failed: groups.length, stop: false };
+        }
+
+        const resultRows =
+          Array.isArray(batchResult && batchResult.results)
+            ? batchResult.results
+            : [];
+        const resultMap = new Map(
+          resultRows.map(result => [
+            String(result && result.conditionId || '').trim(),
+            result
+          ])
+        );
+
+        const invalidGroups = groups.filter(group => {
+          const result = resultMap.get(group.conditionId);
+          return (
+            !result ||
+            Number(result.received) !== group.items.length
+          );
+        });
+
+        if (
+          batchResult.batchVersion !== 'MARKET_INGEST_BATCH_V1_20261016' ||
+          invalidGroups.length > 0
+        ) {
+          const errorMessage =
+            'Ingest batch response validation failed';
+
+          groups.forEach(group => {
+            failedConditions.push({
+              conditionId: group.conditionId || 'UNKNOWN',
+              searchName: '',
+              error: errorMessage
+            });
+          });
+
+          console.error(
+            '⚠️ Ingest batch応答検証FAIL。カーソルは進めません:',
+            JSON.stringify({
+              reason,
+              batchVersion: String(batchResult && batchResult.batchVersion || ''),
+              invalidConditionIds: invalidGroups.map(group => group.conditionId)
+            })
+          );
+
+          return { flushed: 0, failed: groups.length, stop: false };
+        }
+
+        for (const group of groups) {
+          if (
+            !recordMarketScanCursorAck_(
+              cursorAckBatch,
+              group.cursorAck
+            )
+          ) {
+            throw new Error(
+              `Scan cursor batch input invalid after ingest batch: ${group.conditionId}`
+            );
+          }
+
+          const result = resultMap.get(group.conditionId);
+
+          console.log(
+            'INGEST_BATCH_GROUP_RESULT:',
+            JSON.stringify({
+              reason,
+              conditionId: group.conditionId,
+              received: Number(result.received || 0),
+              inserted: Number(result.inserted || 0),
+              updated: Number(result.updated || 0)
+            })
+          );
+        }
+
+        succeededConditions += groups.length;
+
+        if (
+          CURSOR_ACK_BATCH_MODE &&
+          cursorAckBatch.size >= CURSOR_ACK_BATCH_FLUSH_SIZE
+        ) {
+          try {
+            const cursorBatchResult =
+              await flushMarketScanCursorBatch_(
+                cursorAckBatch,
+                'threshold'
+              );
+            cursorCommittedConditions +=
+              Number(cursorBatchResult.committed || 0);
+          } catch (error) {
+            const cursorBatchErrorMessage =
+              error && error.message
+                ? String(error.message)
+                : String(error);
+            const transientCursorBatchFailure =
+              cursorBatchErrorMessage.includes('busy') ||
+              cursorBatchErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
+              /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(cursorBatchErrorMessage) ||
+              cursorBatchErrorMessage.includes('応答がJSONではありません') ||
+              cursorBatchErrorMessage.includes('通信失敗:');
+
+            if (!transientCursorBatchFailure) {
+              throw error;
+            }
+
+            cursorDeferredConditions += cursorAckBatch.size;
+            console.warn(
+              '⚠️ Scan cursor batch一時障害。未commit分は次回再走査:',
+              JSON.stringify({
+                pending: cursorAckBatch.size,
+                error: cursorBatchErrorMessage
+              })
+            );
+            return {
+              flushed: groups.length,
+              stop: true
+            };
+          }
+        }
+
+        return {
+          flushed: groups.length,
+          stop: false
+        };
+      };
+
 
     for (
       let i = 0;
@@ -3867,56 +4126,83 @@ async function main() {
 
       try {
 
-        await scanMercariCondition(
-          page,
-          config,
-          marketCompsCache,
-          cursorAckBatch
-        );
+        if (INGEST_BATCH_MODE) {
+          const prepared =
+            await scanMercariCondition(
+              page,
+              config,
+              marketCompsCache,
+              cursorAckBatch,
+              { deferIngest: true }
+            );
 
+          pendingIngestBatch.push(prepared);
 
-        succeededConditions++;
-
-        if (
-          FAST_MODE &&
-          CURSOR_ACK_BATCH_MODE &&
-          cursorAckBatch.size >= CURSOR_ACK_BATCH_FLUSH_SIZE
-        ) {
-          try {
-            const cursorBatchResult =
-              await flushMarketScanCursorBatch_(
-                cursorAckBatch,
+          if (
+            pendingIngestBatch.length >=
+            INGEST_BATCH_FLUSH_SIZE
+          ) {
+            const flushResult =
+              await flushPendingIngestBatch_(
                 'threshold'
               );
-            cursorCommittedConditions +=
-              Number(cursorBatchResult.committed || 0);
-          } catch (error) {
-            const cursorBatchErrorMessage =
-              error && error.message
-                ? String(error.message)
-                : String(error);
-            const transientCursorBatchFailure =
-              cursorBatchErrorMessage.includes('busy') ||
-              cursorBatchErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
-              /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(cursorBatchErrorMessage) ||
-              cursorBatchErrorMessage.includes('応答がJSONではありません') ||
-              cursorBatchErrorMessage.includes('通信失敗:');
-
-            if (!transientCursorBatchFailure) {
-              throw error;
+            if (flushResult && flushResult.stop) {
+              break;
             }
+          }
+        } else {
+          await scanMercariCondition(
+            page,
+            config,
+            marketCompsCache,
+            cursorAckBatch
+          );
 
-            cursorDeferredConditions += cursorAckBatch.size;
-            console.warn(
-              '⚠️ Scan cursor batch一時障害。未commit分は次回再走査:',
-              JSON.stringify({
-                pending: cursorAckBatch.size,
-                error: cursorBatchErrorMessage
-              })
-            );
-            break;
+
+          succeededConditions++;
+
+          if (
+            FAST_MODE &&
+            CURSOR_ACK_BATCH_MODE &&
+            cursorAckBatch.size >= CURSOR_ACK_BATCH_FLUSH_SIZE
+          ) {
+            try {
+              const cursorBatchResult =
+                await flushMarketScanCursorBatch_(
+                  cursorAckBatch,
+                  'threshold'
+                );
+              cursorCommittedConditions +=
+                Number(cursorBatchResult.committed || 0);
+            } catch (error) {
+              const cursorBatchErrorMessage =
+                error && error.message
+                  ? String(error.message)
+                  : String(error);
+              const transientCursorBatchFailure =
+                cursorBatchErrorMessage.includes('busy') ||
+                cursorBatchErrorMessage.includes('Service Spreadsheets failed while accessing document') ||
+                /HTTP失敗: (404|408|425|429|500|502|503|504)\b/.test(cursorBatchErrorMessage) ||
+                cursorBatchErrorMessage.includes('応答がJSONではありません') ||
+                cursorBatchErrorMessage.includes('通信失敗:');
+
+              if (!transientCursorBatchFailure) {
+                throw error;
+              }
+
+              cursorDeferredConditions += cursorAckBatch.size;
+              console.warn(
+                '⚠️ Scan cursor batch一時障害。未commit分は次回再走査:',
+                JSON.stringify({
+                  pending: cursorAckBatch.size,
+                  error: cursorBatchErrorMessage
+                })
+              );
+              break;
+            }
           }
         }
+
 
       } catch (error) {
 
@@ -4002,6 +4288,15 @@ async function main() {
 
     }
 
+
+    if (
+      INGEST_BATCH_MODE &&
+      pendingIngestBatch.length > 0
+    ) {
+      await flushPendingIngestBatch_(
+        'final'
+      );
+    }
 
     if (
       FAST_MODE &&
