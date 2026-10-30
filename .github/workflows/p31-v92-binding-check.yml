@@ -1,18 +1,14 @@
 # P0-31 candidate only. Isolated branch; no push, PR, or schedule triggers.
 # Promotion and any execution require separate Owner approval.
-# The trusted digest must be independently computed from the Owner-confirmed active V92 Web App URL.
-# Never derive the expected digest from MARKET_INGEST_URL or another GitHub secret.
+# The Owner must independently hash the confirmed active V92 Web App URL before a future run.
+# The resulting digest is to be stored under P31_EXPECTED_V92_SHA256 only after separate authorization.
+# Never derive it from MARKET_INGEST_URL or any other GitHub Secret.
 # MATCH proves exact URL-byte equality only: NOT V92 source parity, Writer/Reader safety, or capacity recovery.
 # The job ref gate protects this job only, not other workflows or repository secret use.
 name: P31 V92 endpoint binding check (manual-only candidate)
 
 on:
   workflow_dispatch:
-    inputs:
-      expected_v92_url_sha256:
-        description: 'Owner-verified SHA-256 of active V92 /exec URL; never derived from GitHub Secrets'
-        required: true
-        type: string
 
 permissions: {}
 
@@ -26,7 +22,7 @@ jobs:
         shell: bash
         env:
           MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
-          EXPECTED_V92_URL_SHA256: ${{ inputs.expected_v92_url_sha256 }}
+          EXPECTED_V92_URL_SHA256: ${{ secrets.P31_EXPECTED_V92_SHA256 }}
         run: |
           node <<'NODE'
           'use strict';
@@ -34,21 +30,10 @@ jobs:
           const raw = process.env.MARKET_INGEST_URL;
           const expected = process.env.EXPECTED_V92_URL_SHA256;
           function canonicalGasExec(value) {
-            if (typeof value !== 'string' || value.length > 2048 || /[\r\n]/.test(value)) return false;
-            try {
-              const u = new URL(value);
-              return u.protocol === 'https:' &&
-                u.hostname === 'script.google.com' &&
-                u.username === '' &&
-                u.password === '' &&
-                u.port === '' &&
-                u.search === '' &&
-                u.hash === '' &&
-                /^\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u.pathname) &&
-                u.href === value;
-            } catch {
-              return false;
-            }
+            if (typeof value !== 'string' || value.length > 2048) return false;
+            // Match the raw bytes: URL parsing may normalize a terminal '?' or '#'.
+            const match = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.exec(value);
+            return !!match && match[0] === value;
           }
           let status = 'UNKNOWN';
           if (canonicalGasExec(raw) &&
