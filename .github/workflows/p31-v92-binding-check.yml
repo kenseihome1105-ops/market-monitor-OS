@@ -1,13 +1,16 @@
 # P0-31 candidate only. Isolated branch; no push, PR, or schedule triggers.
 # Promotion and any execution require separate Owner approval.
-# The trusted digest must be computed independently from the active V92 Web App URL.
+# The trusted digest must be independently computed from the Owner-confirmed active V92 Web App URL.
+# Never derive the expected digest from MARKET_INGEST_URL or another GitHub secret.
+# MATCH proves exact URL-byte equality only: NOT V92 source parity, Writer/Reader safety, or capacity recovery.
+# The job ref gate protects this job only, not other workflows or repository secret use.
 name: P31 V92 endpoint binding check (manual-only candidate)
 
 on:
   workflow_dispatch:
     inputs:
       expected_v92_url_sha256:
-        description: 'SHA-256 hex of the exact independently verified V92 /exec URL (no URL input)'
+        description: 'Owner-verified SHA-256 of active V92 /exec URL; never derived from GitHub Secrets'
         required: true
         type: string
 
@@ -15,6 +18,7 @@ permissions: {}
 
 jobs:
   compare-only:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -54,6 +58,7 @@ jobs:
             const expectedBytes = Buffer.from(expected, 'hex');
             status = crypto.timingSafeEqual(actualBytes, expectedBytes) ? 'MATCH' : 'MISMATCH';
           }
+          // MATCH certifies only the exact Web App URL bytes, not deployed source/version.
           console.log(status);
           if (status !== 'MATCH') process.exitCode = status === 'MISMATCH' ? 1 : 2;
           NODE
