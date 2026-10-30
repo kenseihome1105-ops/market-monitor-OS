@@ -1,0 +1,49 @@
+# P0-31 candidate only. Isolated branch; no push, PR, or schedule triggers.
+# Promotion and any execution require separate Owner approval.
+# The Owner must independently hash the confirmed active V92 Web App URL before a future run.
+# The resulting digest is to be stored under P31_EXPECTED_V92_SHA256 only after separate authorization.
+# Never derive it from MARKET_INGEST_URL or any other GitHub Secret.
+# MATCH proves exact URL-byte equality only: NOT V92 source parity, Writer/Reader safety, or capacity recovery.
+# The job ref gate protects this job only, not other workflows or repository secret use.
+name: P31 V92 endpoint binding check (manual-only candidate)
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  compare-only:
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Compare without HTTP or sensitive output
+        shell: bash
+        env:
+          MARKET_INGEST_URL: ${{ secrets.MARKET_INGEST_URL }}
+          EXPECTED_V92_URL_SHA256: ${{ secrets.P31_EXPECTED_V92_SHA256 }}
+        run: |
+          node <<'NODE'
+          'use strict';
+          const crypto = require('node:crypto');
+          const raw = process.env.MARKET_INGEST_URL;
+          const expected = process.env.EXPECTED_V92_URL_SHA256;
+          function canonicalGasExec(value) {
+            if (typeof value !== 'string' || value.length > 2048) return false;
+            // Match the raw bytes: URL parsing may normalize a terminal '?' or '#'.
+            const match = /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.exec(value);
+            return !!match && match[0] === value;
+          }
+          let status = 'UNKNOWN';
+          if (canonicalGasExec(raw) &&
+              typeof expected === 'string' &&
+              /^[0-9a-fA-F]{64}$/.test(expected)) {
+            const actualBytes = crypto.createHash('sha256').update(raw, 'utf8').digest();
+            const expectedBytes = Buffer.from(expected, 'hex');
+            status = crypto.timingSafeEqual(actualBytes, expectedBytes) ? 'MATCH' : 'MISMATCH';
+          }
+          // MATCH certifies only the exact Web App URL bytes, not deployed source/version.
+          console.log(status);
+          if (status !== 'MATCH') process.exitCode = status === 'MISMATCH' ? 1 : 2;
+          NODE
